@@ -5,6 +5,12 @@ API Configuration
 """
 
 import os
+from pathlib import Path
+
+# Load .env file
+from dotenv import load_dotenv
+env_path = Path(__file__).parent.parent / '.env'
+load_dotenv(env_path)
 
 # ═══════════════════════════════════════════════════════════════
 # API SETTINGS
@@ -36,7 +42,7 @@ ALPACA_DATA_URL = "https://data.alpaca.markets"
 # KIMI AI SETTINGS (via OpenRouter)
 # ═══════════════════════════════════════════════════════════════
 
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "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")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Set in .env file
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 KIMI_MODEL = os.getenv("KIMI_MODEL", "moonshotai/kimi-k2")  # Kimi K2 via OpenRouter
 

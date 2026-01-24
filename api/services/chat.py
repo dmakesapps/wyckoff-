@@ -216,8 +216,24 @@ class ChatService:
                     yield {"type": "text", "content": chunk["content"]}
                     
                 elif chunk.get("type") == "tool_call":
-                    tool_calls.append(chunk)
-                    yield {"type": "tool_call", "name": chunk["name"], "arguments": chunk["arguments"]}
+                    # Validate tool call before yielding
+                    tool_name = chunk.get("name")
+                    tool_args = chunk.get("arguments", {})
+                    
+                    # Skip invalid tool calls (name must be a non-empty string)
+                    if not tool_name or not isinstance(tool_name, str):
+                        continue
+                    
+                    # Ensure arguments is a dict
+                    if not isinstance(tool_args, dict):
+                        tool_args = {}
+                    
+                    tool_calls.append({
+                        "id": chunk.get("id", f"call_{tool_name}"),
+                        "name": tool_name,
+                        "arguments": tool_args
+                    })
+                    yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
             
             # Execute tool calls if any
             if tool_calls and self.tool_executor:
@@ -338,7 +354,16 @@ class ChatService:
         return response
     
     def _parse_stream(self, response: requests.Response) -> Generator[dict, None, None]:
-        """Parse SSE stream from OpenRouter"""
+        """Parse SSE stream from OpenRouter
+        
+        Tool calls come in multiple chunks:
+        - First chunk: has id and name
+        - Subsequent chunks: have arguments (as partial JSON strings)
+        - We accumulate and only yield when complete
+        """
+        
+        # Accumulator for tool calls (keyed by index)
+        pending_tool_calls: dict[int, dict] = {}
         
         for line in response.iter_lines():
             if not line:
@@ -350,26 +375,81 @@ class ChatService:
                 data = line[6:]
                 
                 if data == "[DONE]":
+                    # Stream ended - yield any pending complete tool calls
+                    for idx in sorted(pending_tool_calls.keys()):
+                        tc = pending_tool_calls[idx]
+                        if tc.get("name"):  # Only yield if we have a name
+                            # Try to parse accumulated arguments
+                            args_str = tc.get("arguments_str", "")
+                            try:
+                                args = json.loads(args_str) if args_str else {}
+                            except json.JSONDecodeError:
+                                args = {"raw": args_str}  # Fallback
+                            
+                            yield {
+                                "type": "tool_call",
+                                "id": tc.get("id", f"call_{tc['name']}"),
+                                "name": tc["name"],
+                                "arguments": args
+                            }
                     break
                 
                 try:
                     chunk = json.loads(data)
-                    delta = chunk.get("choices", [{}])[0].get("delta", {})
+                    choices = chunk.get("choices", [])
+                    if not choices:
+                        continue
+                        
+                    delta = choices[0].get("delta", {})
+                    finish_reason = choices[0].get("finish_reason")
                     
                     # Text content
                     if delta.get("content"):
                         yield {"type": "content", "content": delta["content"]}
                     
-                    # Tool calls
+                    # Tool calls - accumulate across chunks
                     if delta.get("tool_calls"):
                         for tool_call in delta["tool_calls"]:
+                            idx = tool_call.get("index", 0)
+                            
+                            # Initialize if new
+                            if idx not in pending_tool_calls:
+                                pending_tool_calls[idx] = {
+                                    "id": None,
+                                    "name": None,
+                                    "arguments_str": ""
+                                }
+                            
+                            # Accumulate data
+                            if tool_call.get("id"):
+                                pending_tool_calls[idx]["id"] = tool_call["id"]
+                            
                             if tool_call.get("function"):
+                                func = tool_call["function"]
+                                if func.get("name"):
+                                    pending_tool_calls[idx]["name"] = func["name"]
+                                if func.get("arguments"):
+                                    pending_tool_calls[idx]["arguments_str"] += func["arguments"]
+                    
+                    # If finish_reason is "tool_calls", yield the accumulated tool calls
+                    if finish_reason == "tool_calls":
+                        for idx in sorted(pending_tool_calls.keys()):
+                            tc = pending_tool_calls[idx]
+                            if tc.get("name"):
+                                args_str = tc.get("arguments_str", "")
+                                try:
+                                    args = json.loads(args_str) if args_str else {}
+                                except json.JSONDecodeError:
+                                    args = {"raw": args_str}
+                                
                                 yield {
                                     "type": "tool_call",
-                                    "id": tool_call.get("id"),
-                                    "name": tool_call["function"].get("name"),
-                                    "arguments": json.loads(tool_call["function"].get("arguments", "{}"))
+                                    "id": tc.get("id", f"call_{tc['name']}"),
+                                    "name": tc["name"],
+                                    "arguments": args
                                 }
+                        # Clear after yielding
+                        pending_tool_calls.clear()
                                 
                 except json.JSONDecodeError:
                     continue
