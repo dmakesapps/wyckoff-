@@ -1,0 +1,682 @@
+# api/services/alpha.py
+
+"""
+Alpha scoring and advanced metrics service
+Identifies high-probability trading opportunities
+"""
+
+from typing import Optional
+from dataclasses import dataclass
+
+from api.models.stock import (
+    StockQuote, TechnicalIndicators, OptionsData, NewsSummary, Fundamentals
+)
+
+
+@dataclass
+class VolumeMetrics:
+    """Detailed volume analysis"""
+    current_volume: int
+    avg_volume_10d: float
+    avg_volume_20d: float
+    avg_volume_50d: float
+    relative_volume: float  # Current vs 20d avg (RVOL)
+    volume_trend_5d: str    # "increasing", "decreasing", "stable"
+    volume_spike: bool      # > 2x average
+    volume_dry_up: bool     # < 0.5x average
+    dollar_volume: float    # Price * Volume
+    accumulation_distribution: str  # "accumulation", "distribution", "neutral"
+
+
+@dataclass  
+class AlphaSignal:
+    """Individual alpha signal"""
+    name: str
+    signal_type: str  # "bullish", "bearish", "neutral"
+    strength: int     # 1-5
+    description: str
+
+
+@dataclass
+class AlphaScore:
+    """Comprehensive alpha scoring"""
+    total_score: int          # -100 to +100
+    bullish_signals: int
+    bearish_signals: int
+    signal_strength: str      # "strong", "moderate", "weak"
+    signals: list[dict]
+    volume_metrics: dict
+    momentum_grade: str       # A, B, C, D, F
+    trend_grade: str
+    risk_reward_grade: str
+    overall_grade: str
+    summary: str
+
+
+class AlphaService:
+    """Service for calculating alpha scores and advanced metrics"""
+    
+    def calculate_volume_metrics(
+        self,
+        volumes: list[int],
+        closes: list[float],
+        current_price: float,
+        current_volume: int,
+    ) -> dict:
+        """Calculate detailed volume metrics"""
+        
+        if not volumes or len(volumes) < 10:
+            return {}
+        
+        # Average volumes
+        avg_10d = sum(volumes[-10:]) / 10
+        avg_20d = sum(volumes[-20:]) / min(20, len(volumes))
+        avg_50d = sum(volumes[-50:]) / min(50, len(volumes))
+        
+        # Relative volume (RVOL)
+        rvol = current_volume / avg_20d if avg_20d > 0 else 1.0
+        
+        # Volume trend (compare last 5 days vs previous 5 days)
+        if len(volumes) >= 10:
+            recent_avg = sum(volumes[-5:]) / 5
+            prior_avg = sum(volumes[-10:-5]) / 5
+            if recent_avg > prior_avg * 1.2:
+                volume_trend = "increasing"
+            elif recent_avg < prior_avg * 0.8:
+                volume_trend = "decreasing"
+            else:
+                volume_trend = "stable"
+        else:
+            volume_trend = "unknown"
+        
+        # Volume spike / dry up
+        volume_spike = rvol >= 2.0
+        volume_dry_up = rvol <= 0.5
+        
+        # Dollar volume
+        dollar_volume = current_price * current_volume
+        
+        # Accumulation/Distribution (simplified)
+        # Compare volume on up days vs down days
+        if len(closes) >= 10 and len(volumes) >= 10:
+            up_volume = 0
+            down_volume = 0
+            for i in range(-10, 0):
+                if closes[i] > closes[i-1]:
+                    up_volume += volumes[i]
+                else:
+                    down_volume += volumes[i]
+            
+            if up_volume > down_volume * 1.3:
+                acc_dist = "accumulation"
+            elif down_volume > up_volume * 1.3:
+                acc_dist = "distribution"
+            else:
+                acc_dist = "neutral"
+        else:
+            acc_dist = "unknown"
+        
+        return {
+            "current_volume": current_volume,
+            "avg_volume_10d": round(avg_10d),
+            "avg_volume_20d": round(avg_20d),
+            "avg_volume_50d": round(avg_50d),
+            "relative_volume": round(rvol, 2),
+            "relative_volume_label": self._rvol_label(rvol),
+            "volume_trend_5d": volume_trend,
+            "volume_spike": volume_spike,
+            "volume_dry_up": volume_dry_up,
+            "dollar_volume": round(dollar_volume),
+            "dollar_volume_formatted": self._format_dollar_volume(dollar_volume),
+            "accumulation_distribution": acc_dist,
+        }
+    
+    def _rvol_label(self, rvol: float) -> str:
+        """Convert RVOL to human label"""
+        if rvol >= 3.0:
+            return "extremely high"
+        elif rvol >= 2.0:
+            return "very high"
+        elif rvol >= 1.5:
+            return "high"
+        elif rvol >= 0.8:
+            return "normal"
+        elif rvol >= 0.5:
+            return "low"
+        else:
+            return "very low"
+    
+    def _format_dollar_volume(self, value: float) -> str:
+        """Format dollar volume"""
+        if value >= 1_000_000_000:
+            return f"${value / 1_000_000_000:.2f}B"
+        elif value >= 1_000_000:
+            return f"${value / 1_000_000:.2f}M"
+        elif value >= 1_000:
+            return f"${value / 1_000:.1f}K"
+        return f"${value:.0f}"
+    
+    def calculate_alpha_score(
+        self,
+        quote: StockQuote,
+        technicals: TechnicalIndicators,
+        volume_metrics: dict,
+        options: Optional[OptionsData] = None,
+        news: Optional[NewsSummary] = None,
+        fundamentals: Optional[Fundamentals] = None,
+    ) -> dict:
+        """
+        Calculate comprehensive alpha score
+        
+        Returns score from -100 (very bearish) to +100 (very bullish)
+        with detailed breakdown
+        """
+        
+        signals = []
+        bullish_points = 0
+        bearish_points = 0
+        
+        # ═══════════════════════════════════════════════════════════════
+        # TREND SIGNALS
+        # ═══════════════════════════════════════════════════════════════
+        
+        ma = technicals.moving_averages
+        
+        # Golden/Death Cross (strong signal)
+        if ma.golden_cross:
+            signals.append({
+                "name": "Golden Cross",
+                "type": "bullish",
+                "strength": 4,
+                "description": "50 SMA above 200 SMA - long-term bullish"
+            })
+            bullish_points += 15
+        elif ma.death_cross:
+            signals.append({
+                "name": "Death Cross", 
+                "type": "bearish",
+                "strength": 4,
+                "description": "50 SMA below 200 SMA - long-term bearish"
+            })
+            bearish_points += 15
+        
+        # Price vs Major MAs
+        above_all_mas = (
+            ma.price_vs_sma_20 == "above" and 
+            ma.price_vs_sma_50 == "above" and 
+            ma.price_vs_sma_200 == "above"
+        )
+        below_all_mas = (
+            ma.price_vs_sma_20 == "below" and 
+            ma.price_vs_sma_50 == "below" and 
+            ma.price_vs_sma_200 == "below"
+        )
+        
+        if above_all_mas:
+            signals.append({
+                "name": "Above All MAs",
+                "type": "bullish", 
+                "strength": 3,
+                "description": "Price above 20/50/200 SMA - strong uptrend"
+            })
+            bullish_points += 10
+        elif below_all_mas:
+            signals.append({
+                "name": "Below All MAs",
+                "type": "bearish",
+                "strength": 3, 
+                "description": "Price below 20/50/200 SMA - strong downtrend"
+            })
+            bearish_points += 10
+        
+        # ═══════════════════════════════════════════════════════════════
+        # MOMENTUM SIGNALS
+        # ═══════════════════════════════════════════════════════════════
+        
+        mom = technicals.momentum
+        
+        # RSI
+        if mom.rsi:
+            if mom.rsi <= 30:
+                signals.append({
+                    "name": "RSI Oversold",
+                    "type": "bullish",
+                    "strength": 3,
+                    "description": f"RSI at {mom.rsi:.0f} - potential bounce"
+                })
+                bullish_points += 8
+            elif mom.rsi >= 70:
+                signals.append({
+                    "name": "RSI Overbought",
+                    "type": "bearish",
+                    "strength": 3,
+                    "description": f"RSI at {mom.rsi:.0f} - potential pullback"
+                })
+                bearish_points += 8
+            elif 50 <= mom.rsi <= 60:
+                signals.append({
+                    "name": "RSI Bullish Zone",
+                    "type": "bullish",
+                    "strength": 2,
+                    "description": f"RSI at {mom.rsi:.0f} - healthy momentum"
+                })
+                bullish_points += 5
+        
+        # MACD
+        if mom.macd_trend == "bullish":
+            signals.append({
+                "name": "MACD Bullish",
+                "type": "bullish",
+                "strength": 3,
+                "description": "MACD above signal line"
+            })
+            bullish_points += 8
+        elif mom.macd_trend == "bearish":
+            signals.append({
+                "name": "MACD Bearish",
+                "type": "bearish",
+                "strength": 3,
+                "description": "MACD below signal line"
+            })
+            bearish_points += 8
+        
+        # ═══════════════════════════════════════════════════════════════
+        # VOLUME SIGNALS
+        # ═══════════════════════════════════════════════════════════════
+        
+        if volume_metrics:
+            rvol = volume_metrics.get("relative_volume", 1.0)
+            acc_dist = volume_metrics.get("accumulation_distribution")
+            vol_trend = volume_metrics.get("volume_trend_5d")
+            
+            # High volume breakout
+            if rvol >= 2.0 and quote.change_percent > 2:
+                signals.append({
+                    "name": "Volume Breakout",
+                    "type": "bullish",
+                    "strength": 5,
+                    "description": f"Price up {quote.change_percent:.1f}% on {rvol:.1f}x volume"
+                })
+                bullish_points += 15
+            elif rvol >= 2.0 and quote.change_percent < -2:
+                signals.append({
+                    "name": "Volume Breakdown",
+                    "type": "bearish",
+                    "strength": 5,
+                    "description": f"Price down {abs(quote.change_percent):.1f}% on {rvol:.1f}x volume"
+                })
+                bearish_points += 15
+            elif rvol >= 1.5:
+                signals.append({
+                    "name": "Elevated Volume",
+                    "type": "neutral",
+                    "strength": 2,
+                    "description": f"Volume {rvol:.1f}x average - increased interest"
+                })
+            
+            # Accumulation/Distribution
+            if acc_dist == "accumulation":
+                signals.append({
+                    "name": "Accumulation Pattern",
+                    "type": "bullish",
+                    "strength": 3,
+                    "description": "Higher volume on up days - institutional buying"
+                })
+                bullish_points += 8
+            elif acc_dist == "distribution":
+                signals.append({
+                    "name": "Distribution Pattern",
+                    "type": "bearish",
+                    "strength": 3,
+                    "description": "Higher volume on down days - institutional selling"
+                })
+                bearish_points += 8
+            
+            # Volume trend
+            if vol_trend == "increasing" and quote.change_percent > 0:
+                signals.append({
+                    "name": "Rising Volume Trend",
+                    "type": "bullish",
+                    "strength": 2,
+                    "description": "5-day volume trend increasing with price"
+                })
+                bullish_points += 5
+        
+        # ═══════════════════════════════════════════════════════════════
+        # VOLATILITY SIGNALS  
+        # ═══════════════════════════════════════════════════════════════
+        
+        vol = technicals.volatility
+        
+        # Bollinger Band squeeze (low volatility = potential breakout)
+        if vol.bb_upper and vol.bb_lower and vol.bb_middle:
+            bb_width = (vol.bb_upper - vol.bb_lower) / vol.bb_middle
+            if bb_width < 0.1:  # Tight bands
+                signals.append({
+                    "name": "Bollinger Squeeze",
+                    "type": "neutral",
+                    "strength": 4,
+                    "description": "Low volatility - breakout imminent"
+                })
+                # Could go either way, slight bullish bias
+                bullish_points += 3
+        
+        # Price at Bollinger extremes
+        if vol.bb_position == "below_lower":
+            signals.append({
+                "name": "Below Lower BB",
+                "type": "bullish",
+                "strength": 3,
+                "description": "Price below lower Bollinger Band - oversold"
+            })
+            bullish_points += 8
+        elif vol.bb_position == "above_upper":
+            signals.append({
+                "name": "Above Upper BB",
+                "type": "bearish",
+                "strength": 2,
+                "description": "Price above upper Bollinger Band - extended"
+            })
+            bearish_points += 5
+        
+        # ═══════════════════════════════════════════════════════════════
+        # PRICE LEVEL SIGNALS
+        # ═══════════════════════════════════════════════════════════════
+        
+        levels = technicals.price_levels
+        
+        # Near ATH
+        if levels.distance_from_ath and levels.distance_from_ath > -5:
+            signals.append({
+                "name": "Near All-Time High",
+                "type": "bullish",
+                "strength": 4,
+                "description": f"Only {abs(levels.distance_from_ath):.1f}% from ATH"
+            })
+            bullish_points += 12
+        
+        # Breaking ATH
+        if levels.distance_from_ath and levels.distance_from_ath > 0:
+            signals.append({
+                "name": "New All-Time High",
+                "type": "bullish",
+                "strength": 5,
+                "description": f"Trading {levels.distance_from_ath:.1f}% above previous ATH"
+            })
+            bullish_points += 15
+        
+        # Near 52-week high
+        if levels.distance_from_52w_high and -10 < levels.distance_from_52w_high < 0:
+            signals.append({
+                "name": "Near 52-Week High",
+                "type": "bullish",
+                "strength": 3,
+                "description": f"{abs(levels.distance_from_52w_high):.1f}% from 52-week high"
+            })
+            bullish_points += 7
+        
+        # Near 52-week low (potential value or falling knife)
+        if levels.distance_from_52w_low and levels.distance_from_52w_low < 10:
+            signals.append({
+                "name": "Near 52-Week Low",
+                "type": "bearish",
+                "strength": 3,
+                "description": f"Only {levels.distance_from_52w_low:.1f}% above 52-week low"
+            })
+            bearish_points += 7
+        
+        # ═══════════════════════════════════════════════════════════════
+        # OPTIONS FLOW SIGNALS
+        # ═══════════════════════════════════════════════════════════════
+        
+        if options:
+            # Put/Call ratio
+            if options.put_call_ratio:
+                if options.put_call_ratio < 0.5:
+                    signals.append({
+                        "name": "Very Low Put/Call",
+                        "type": "bullish",
+                        "strength": 3,
+                        "description": f"P/C ratio {options.put_call_ratio:.2f} - strong call buying"
+                    })
+                    bullish_points += 10
+                elif options.put_call_ratio < 0.7:
+                    signals.append({
+                        "name": "Low Put/Call",
+                        "type": "bullish",
+                        "strength": 2,
+                        "description": f"P/C ratio {options.put_call_ratio:.2f} - bullish options flow"
+                    })
+                    bullish_points += 5
+                elif options.put_call_ratio > 1.5:
+                    signals.append({
+                        "name": "Very High Put/Call",
+                        "type": "bearish",
+                        "strength": 3,
+                        "description": f"P/C ratio {options.put_call_ratio:.2f} - heavy put buying"
+                    })
+                    bearish_points += 10
+                elif options.put_call_ratio > 1.2:
+                    signals.append({
+                        "name": "High Put/Call",
+                        "type": "bearish",
+                        "strength": 2,
+                        "description": f"P/C ratio {options.put_call_ratio:.2f} - bearish options flow"
+                    })
+                    bearish_points += 5
+            
+            # Unusual options activity
+            if options.unusual_activity:
+                call_unusual = sum(1 for u in options.unusual_activity if u["type"] == "call")
+                put_unusual = sum(1 for u in options.unusual_activity if u["type"] == "put")
+                
+                if call_unusual > put_unusual * 2:
+                    signals.append({
+                        "name": "Unusual Call Activity",
+                        "type": "bullish",
+                        "strength": 4,
+                        "description": f"{call_unusual} unusual call sweeps detected"
+                    })
+                    bullish_points += 12
+                elif put_unusual > call_unusual * 2:
+                    signals.append({
+                        "name": "Unusual Put Activity",
+                        "type": "bearish",
+                        "strength": 4,
+                        "description": f"{put_unusual} unusual put sweeps detected"
+                    })
+                    bearish_points += 12
+        
+        # ═══════════════════════════════════════════════════════════════
+        # NEWS/CATALYST SIGNALS
+        # ═══════════════════════════════════════════════════════════════
+        
+        if news:
+            if news.overall_sentiment == "positive":
+                signals.append({
+                    "name": "Positive News Sentiment",
+                    "type": "bullish",
+                    "strength": 2,
+                    "description": "Recent news is positive"
+                })
+                bullish_points += 5
+            elif news.overall_sentiment == "negative":
+                signals.append({
+                    "name": "Negative News Sentiment",
+                    "type": "bearish",
+                    "strength": 2,
+                    "description": "Recent news is negative"
+                })
+                bearish_points += 5
+            
+            # Upcoming earnings
+            if news.earnings_date:
+                signals.append({
+                    "name": "Upcoming Earnings",
+                    "type": "neutral",
+                    "strength": 3,
+                    "description": f"Earnings on {news.earnings_date}"
+                })
+        
+        # ═══════════════════════════════════════════════════════════════
+        # FUNDAMENTAL SIGNALS
+        # ═══════════════════════════════════════════════════════════════
+        
+        if fundamentals:
+            # Short interest
+            if fundamentals.short_percent:
+                if fundamentals.short_percent > 0.20:
+                    signals.append({
+                        "name": "High Short Interest",
+                        "type": "bullish",  # Squeeze potential
+                        "strength": 3,
+                        "description": f"{fundamentals.short_percent*100:.1f}% short - squeeze potential"
+                    })
+                    bullish_points += 8
+                elif fundamentals.short_percent > 0.10:
+                    signals.append({
+                        "name": "Elevated Short Interest",
+                        "type": "neutral",
+                        "strength": 2,
+                        "description": f"{fundamentals.short_percent*100:.1f}% of float short"
+                    })
+        
+        # ═══════════════════════════════════════════════════════════════
+        # CALCULATE FINAL SCORES
+        # ═══════════════════════════════════════════════════════════════
+        
+        # Net score (-100 to +100)
+        max_possible = max(bullish_points, bearish_points, 1)
+        raw_score = bullish_points - bearish_points
+        total_score = max(-100, min(100, int(raw_score * 100 / 50)))  # Normalize
+        
+        # Determine grades
+        momentum_grade = self._grade_momentum(technicals)
+        trend_grade = self._grade_trend(technicals)
+        risk_reward_grade = self._grade_risk_reward(technicals, quote)
+        
+        # Overall grade
+        grades = [momentum_grade, trend_grade, risk_reward_grade]
+        grade_values = {"A": 4, "B": 3, "C": 2, "D": 1, "F": 0}
+        avg_grade = sum(grade_values.get(g, 2) for g in grades) / len(grades)
+        
+        if avg_grade >= 3.5:
+            overall_grade = "A"
+        elif avg_grade >= 2.5:
+            overall_grade = "B"
+        elif avg_grade >= 1.5:
+            overall_grade = "C"
+        elif avg_grade >= 0.5:
+            overall_grade = "D"
+        else:
+            overall_grade = "F"
+        
+        # Signal strength
+        if abs(total_score) >= 50:
+            signal_strength = "strong"
+        elif abs(total_score) >= 25:
+            signal_strength = "moderate"
+        else:
+            signal_strength = "weak"
+        
+        # Summary
+        direction = "bullish" if total_score > 10 else "bearish" if total_score < -10 else "neutral"
+        bullish_count = len([s for s in signals if s["type"] == "bullish"])
+        bearish_count = len([s for s in signals if s["type"] == "bearish"])
+        
+        summary = f"{signal_strength.title()} {direction} setup with {bullish_count} bullish and {bearish_count} bearish signals. "
+        
+        if signals:
+            top_signal = max(signals, key=lambda x: x["strength"])
+            summary += f"Key signal: {top_signal['name']}."
+        
+        return {
+            "total_score": total_score,
+            "bullish_signals": bullish_count,
+            "bearish_signals": bearish_count,
+            "signal_strength": signal_strength,
+            "signals": signals,
+            "momentum_grade": momentum_grade,
+            "trend_grade": trend_grade,
+            "risk_reward_grade": risk_reward_grade,
+            "overall_grade": overall_grade,
+            "summary": summary,
+        }
+    
+    def _grade_momentum(self, technicals: TechnicalIndicators) -> str:
+        """Grade momentum A-F"""
+        score = 0
+        
+        mom = technicals.momentum
+        if mom.macd_trend == "bullish":
+            score += 2
+        if mom.rsi and 40 <= mom.rsi <= 60:
+            score += 1
+        elif mom.rsi and 50 <= mom.rsi <= 70:
+            score += 2
+        if mom.stochastic_signal == "neutral":
+            score += 1
+        
+        if score >= 4:
+            return "A"
+        elif score >= 3:
+            return "B"
+        elif score >= 2:
+            return "C"
+        elif score >= 1:
+            return "D"
+        return "F"
+    
+    def _grade_trend(self, technicals: TechnicalIndicators) -> str:
+        """Grade trend strength A-F"""
+        score = 0
+        
+        ma = technicals.moving_averages
+        if ma.golden_cross:
+            score += 2
+        if ma.price_vs_sma_20 == "above":
+            score += 1
+        if ma.price_vs_sma_50 == "above":
+            score += 1
+        if ma.price_vs_sma_200 == "above":
+            score += 1
+        
+        if score >= 4:
+            return "A"
+        elif score >= 3:
+            return "B"
+        elif score >= 2:
+            return "C"
+        elif score >= 1:
+            return "D"
+        return "F"
+    
+    def _grade_risk_reward(self, technicals: TechnicalIndicators, quote: StockQuote) -> str:
+        """Grade risk/reward setup A-F"""
+        score = 0
+        
+        vol = technicals.volatility
+        levels = technicals.price_levels
+        
+        # Good entry near support
+        if vol.bb_position == "below_lower":
+            score += 2
+        elif vol.bb_position == "within":
+            score += 1
+        
+        # Not extended
+        if levels.distance_from_ath and levels.distance_from_ath < -20:
+            score += 1  # Room to run
+        
+        # Reasonable volatility
+        if vol.atr_percent and vol.atr_percent < 5:
+            score += 1
+        
+        if score >= 3:
+            return "A"
+        elif score >= 2:
+            return "B"
+        elif score >= 1:
+            return "C"
+        return "D"
+
