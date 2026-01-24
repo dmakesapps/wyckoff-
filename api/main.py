@@ -4,8 +4,10 @@
 Alpha Discovery API — FastAPI Application
 """
 
-from fastapi import FastAPI, HTTPException, Query
+import json
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -19,6 +21,7 @@ from api.services.options import OptionsService
 from api.services.news import NewsService
 from api.services.kimi import KimiService
 from api.services.alpha import AlphaService
+from api.services.chat import ChatService
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -34,7 +37,7 @@ app = FastAPI(
 # CORS for React frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+    allow_origins=["*"],  # Allow all for development
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -47,6 +50,163 @@ options_service = OptionsService()
 news_service = NewsService()
 kimi_service = KimiService()
 alpha_service = AlphaService()
+
+
+# ═══════════════════════════════════════════════════════════════
+# TOOL EXECUTOR FOR CHAT
+# ═══════════════════════════════════════════════════════════════
+
+def execute_tool(tool_name: str, arguments: dict) -> dict:
+    """Execute a tool and return results for Kimi to use"""
+    
+    try:
+        if tool_name == "get_stock_analysis":
+            symbol = arguments.get("symbol", "").upper()
+            quote = stock_service.get_quote(symbol)
+            if not quote:
+                return {"error": f"Symbol {symbol} not found"}
+            
+            history = stock_service.get_historical_data(symbol, period="1y")
+            if not history:
+                return {"error": f"No historical data for {symbol}"}
+            
+            technicals = indicator_service.calculate_all(
+                closes=history["closes"],
+                highs=history["highs"],
+                lows=history["lows"],
+                volumes=[int(v) for v in history["volumes"]],
+                current_price=quote.price,
+            )
+            
+            volume_metrics = alpha_service.calculate_volume_metrics(
+                volumes=[int(v) for v in history["volumes"]],
+                closes=history["closes"],
+                current_price=quote.price,
+                current_volume=quote.volume,
+            )
+            
+            options = None
+            if arguments.get("include_options", True):
+                options = options_service.get_options_data(symbol)
+            
+            news = None
+            if arguments.get("include_news", True):
+                news = news_service.get_news(symbol)
+            
+            alpha_score = alpha_service.calculate_alpha_score(
+                quote=quote,
+                technicals=technicals,
+                volume_metrics=volume_metrics,
+                options=options,
+                news=news,
+            )
+            
+            return {
+                "symbol": symbol,
+                "company_name": stock_service.get_company_name(symbol),
+                "price": quote.price,
+                "change_percent": quote.change_percent,
+                "volume": quote.volume,
+                "alpha_score": alpha_score.get("total_score"),
+                "alpha_grade": alpha_score.get("overall_grade"),
+                "trend": technicals.overall_trend,
+                "rsi": technicals.momentum.rsi,
+                "macd_trend": technicals.momentum.macd_trend,
+                "volume_metrics": volume_metrics,
+                "signals": alpha_score.get("signals", [])[:5],
+                "options_summary": {
+                    "put_call_ratio": options.put_call_ratio if options else None,
+                    "unusual_activity": len(options.unusual_activity) if options else 0,
+                } if options else None,
+                "news_summary": {
+                    "sentiment": news.overall_sentiment if news else None,
+                    "article_count": len(news.articles) if news else 0,
+                    "catalysts": news.key_catalysts if news else [],
+                    "headlines": [a.title for a in news.articles[:3]] if news else [],
+                } if news else None,
+            }
+        
+        elif tool_name == "get_stock_quote":
+            symbol = arguments.get("symbol", "").upper()
+            quote = stock_service.get_quote(symbol)
+            if not quote:
+                return {"error": f"Symbol {symbol} not found"}
+            return {
+                "symbol": symbol,
+                "price": quote.price,
+                "change": quote.change,
+                "change_percent": quote.change_percent,
+                "volume": quote.volume,
+                "high": quote.high,
+                "low": quote.low,
+            }
+        
+        elif tool_name == "get_stock_news":
+            symbol = arguments.get("symbol", "").upper()
+            limit = arguments.get("limit", 10)
+            news = news_service.get_news(symbol, limit=limit)
+            if not news:
+                return {"error": f"No news found for {symbol}"}
+            return {
+                "symbol": symbol,
+                "overall_sentiment": news.overall_sentiment,
+                "catalysts": news.key_catalysts,
+                "earnings_date": news.earnings_date,
+                "articles": [
+                    {
+                        "citation": i + 1,
+                        "title": a.title,
+                        "source": a.source,
+                        "url": a.url,
+                        "sentiment": a.sentiment,
+                    }
+                    for i, a in enumerate(news.articles)
+                ],
+            }
+        
+        elif tool_name == "get_options_flow":
+            symbol = arguments.get("symbol", "").upper()
+            options = options_service.get_options_data(symbol)
+            if not options:
+                return {"error": f"No options data for {symbol}"}
+            sentiment = options_service.analyze_sentiment(options)
+            return {
+                "symbol": symbol,
+                "put_call_ratio": options.put_call_ratio,
+                "total_call_volume": options.total_call_volume,
+                "total_put_volume": options.total_put_volume,
+                "max_pain": options.max_pain,
+                "sentiment": sentiment,
+                "unusual_activity": options.unusual_activity[:5],
+            }
+        
+        elif tool_name == "get_market_news":
+            # General market news - use SPY as proxy
+            news = news_service.get_news("SPY", limit=10)
+            if not news:
+                return {"articles": [], "sentiment": "neutral"}
+            return {
+                "overall_sentiment": news.overall_sentiment,
+                "articles": [
+                    {
+                        "citation": i + 1,
+                        "title": a.title,
+                        "source": a.source,
+                        "sentiment": a.sentiment,
+                    }
+                    for i, a in enumerate(news.articles)
+                ],
+            }
+        
+        else:
+            return {"error": f"Unknown tool: {tool_name}"}
+            
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# Initialize chat service with tool executor
+chat_service = ChatService(tool_executor=execute_tool)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -392,6 +552,174 @@ async def scan_market(request: ScanRequest):
     results.sort(key=lambda x: x.score, reverse=True)
     
     return results[:50]  # Top 50
+
+
+# ═══════════════════════════════════════════════════════════════
+# CHAT ENDPOINT (Streaming)
+# ═══════════════════════════════════════════════════════════════
+
+@app.post("/api/chat")
+async def chat(request: Request):
+    """
+    Chat endpoint with streaming and tool calling
+    
+    Input:
+    {
+        "messages": [
+            {"role": "user", "content": "Why is NVDA up today?"}
+        ],
+        "stream": true  // optional, default true
+    }
+    
+    Output (SSE stream):
+    data: {"type": "text", "content": "NVDA is up..."}
+    data: {"type": "tool_call", "name": "get_stock_analysis", "arguments": {...}}
+    data: {"type": "tool_result", "name": "...", "result": {...}}
+    data: {"type": "done", "content": "full response"}
+    """
+    body = await request.json()
+    messages = body.get("messages", [])
+    stream = body.get("stream", True)
+    
+    if not messages:
+        raise HTTPException(status_code=400, detail="No messages provided")
+    
+    if stream:
+        async def generate():
+            for chunk in chat_service.chat_stream(messages):
+                yield f"data: {json.dumps(chunk)}\n\n"
+        
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            }
+        )
+    else:
+        # Non-streaming response
+        result = chat_service.chat_sync(messages)
+        return result
+
+
+# ═══════════════════════════════════════════════════════════════
+# POSITIONS ENDPOINT
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/positions")
+async def get_positions():
+    """
+    Get user's portfolio positions with live prices
+    
+    Note: This is currently using sample data.
+    In production, integrate with a broker API or database.
+    """
+    # Sample positions - replace with real data source
+    sample_positions = [
+        {"symbol": "AAPL", "shares": 100, "avg_cost": 150.00},
+        {"symbol": "NVDA", "shares": 50, "avg_cost": 450.00},
+        {"symbol": "TSLA", "shares": 25, "avg_cost": 200.00},
+        {"symbol": "MSFT", "shares": 75, "avg_cost": 350.00},
+    ]
+    
+    positions = []
+    total_value = 0
+    total_cost = 0
+    total_gain_loss = 0
+    
+    for pos in sample_positions:
+        quote = stock_service.get_quote(pos["symbol"])
+        if quote:
+            current_value = quote.price * pos["shares"]
+            cost_basis = pos["avg_cost"] * pos["shares"]
+            gain_loss = current_value - cost_basis
+            gain_loss_pct = (gain_loss / cost_basis) * 100
+            
+            positions.append({
+                "symbol": pos["symbol"],
+                "company_name": stock_service.get_company_name(pos["symbol"]),
+                "shares": pos["shares"],
+                "avg_cost": pos["avg_cost"],
+                "current_price": quote.price,
+                "current_value": round(current_value, 2),
+                "cost_basis": round(cost_basis, 2),
+                "gain_loss": round(gain_loss, 2),
+                "gain_loss_percent": round(gain_loss_pct, 2),
+                "day_change": quote.change,
+                "day_change_percent": quote.change_percent,
+            })
+            
+            total_value += current_value
+            total_cost += cost_basis
+            total_gain_loss += gain_loss
+    
+    return {
+        "positions": positions,
+        "summary": {
+            "total_value": round(total_value, 2),
+            "total_cost": round(total_cost, 2),
+            "total_gain_loss": round(total_gain_loss, 2),
+            "total_gain_loss_percent": round((total_gain_loss / total_cost) * 100, 2) if total_cost > 0 else 0,
+        },
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# MARKET NEWS ENDPOINT
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/market/news")
+async def get_market_news(limit: int = Query(15, ge=1, le=50)):
+    """
+    Get general market news with sentiment analysis
+    
+    Uses major indices/ETFs to get broad market news:
+    - SPY (S&P 500)
+    - QQQ (Nasdaq)
+    """
+    # Fetch news from major market proxies
+    spy_news = news_service.get_news("SPY", limit=limit // 2)
+    qqq_news = news_service.get_news("QQQ", limit=limit // 2)
+    
+    all_articles = []
+    
+    if spy_news:
+        all_articles.extend(spy_news.articles)
+    if qqq_news:
+        all_articles.extend(qqq_news.articles)
+    
+    # Sort by date and deduplicate
+    seen_titles = set()
+    unique_articles = []
+    for article in sorted(all_articles, key=lambda x: x.published_at, reverse=True):
+        if article.title not in seen_titles:
+            seen_titles.add(article.title)
+            unique_articles.append(article)
+    
+    # Calculate overall sentiment
+    sentiments = [a.sentiment for a in unique_articles]
+    pos = sentiments.count("positive")
+    neg = sentiments.count("negative")
+    overall = "positive" if pos > neg else "negative" if neg > pos else "neutral"
+    
+    return {
+        "overall_sentiment": overall,
+        "article_count": len(unique_articles),
+        "articles": [
+            {
+                "id": i + 1,
+                "title": article.title,
+                "source": article.source,
+                "url": article.url,
+                "published_at": article.published_at.isoformat(),
+                "sentiment": article.sentiment,
+            }
+            for i, article in enumerate(unique_articles[:limit])
+        ],
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # ═══════════════════════════════════════════════════════════════

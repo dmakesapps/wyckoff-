@@ -6,4 +6,5 @@ from .options import OptionsService
 from .news import NewsService
 from .kimi import KimiService
 from .alpha import AlphaService
+from .chat import ChatService
 
