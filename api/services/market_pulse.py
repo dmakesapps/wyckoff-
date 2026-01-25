@@ -69,16 +69,21 @@ class MarketPulseService:
             Dict with updates array and metadata
         """
         with self._lock:
-            # Check cache
+            # Check cache - but only if it has actual updates
             if not force_refresh and self._is_cache_valid():
-                return self._cache
+                if self._cache and self._cache.get("updates"):
+                    return self._cache
             
             # Generate new pulse
             pulse = self._generate_pulse()
             
-            # Cache it
-            self._cache = pulse
-            self._cache_time = datetime.now(timezone.utc)
+            # Only cache if we got valid updates
+            if pulse.get("updates"):
+                self._cache = pulse
+                self._cache_time = datetime.now(timezone.utc)
+                logger.info(f"Cached market pulse with {len(pulse['updates'])} updates")
+            else:
+                logger.warning("Generated pulse has no updates, not caching")
             
             return pulse
     
@@ -211,6 +216,7 @@ class MarketPulseService:
         
         try:
             # Call Kimi API
+            logger.info("Calling Kimi API for headline generation...")
             response = requests.post(
                 f"{OPENROUTER_BASE_URL}/chat/completions",
                 headers={
@@ -233,15 +239,30 @@ class MarketPulseService:
             result = response.json()
             
             content = result["choices"][0]["message"]["content"]
+            logger.info(f"Kimi response received: {len(content)} chars")
             
             # Parse JSON from response
             updates = self._parse_headlines(content)
             
+            # If Kimi returned empty or invalid, use fallback
+            if not updates or len(updates) < 3:
+                logger.warning(f"Kimi returned insufficient updates ({len(updates)}), using fallback")
+                return self._generate_fallback_headlines(market_data)
+            
+            logger.info(f"Successfully parsed {len(updates)} headlines from Kimi")
             return updates
             
+        except requests.exceptions.Timeout:
+            logger.error("Kimi API timed out after 30 seconds")
+            return self._generate_fallback_headlines(market_data)
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Kimi API request failed: {e}")
+            return self._generate_fallback_headlines(market_data)
+        except (KeyError, IndexError) as e:
+            logger.error(f"Failed to parse Kimi response structure: {e}")
+            return self._generate_fallback_headlines(market_data)
         except Exception as e:
-            logger.error(f"Kimi headline generation failed: {e}")
-            # Return fallback headlines based on raw data
+            logger.error(f"Unexpected error in headline generation: {e}")
             return self._generate_fallback_headlines(market_data)
     
     def _get_system_prompt(self) -> str:
@@ -323,90 +344,163 @@ Output ONLY valid JSON array, no markdown, no explanation:
             content = content.strip()
             
             # Remove markdown code blocks if present
-            if content.startswith("```"):
-                content = content.split("```")[1]
-                if content.startswith("json"):
-                    content = content[4:]
+            if "```" in content:
+                # Find JSON between code blocks
+                parts = content.split("```")
+                for part in parts:
+                    part = part.strip()
+                    if part.startswith("json"):
+                        part = part[4:].strip()
+                    if part.startswith("["):
+                        content = part
+                        break
+            
+            # Try to find JSON array in content
+            start = content.find("[")
+            end = content.rfind("]") + 1
+            if start != -1 and end > start:
+                content = content[start:end]
             
             updates = json.loads(content)
+            
+            if not isinstance(updates, list):
+                logger.error("Kimi response is not a list")
+                return []
             
             # Validate structure
             valid_updates = []
             for update in updates:
                 if isinstance(update, dict) and "category" in update and "headline" in update:
-                    valid_updates.append({
-                        "category": update["category"],
-                        "headline": update["headline"][:80],  # Enforce max length
-                        "sentiment": update.get("sentiment", "neutral"),
-                    })
+                    headline = str(update["headline"]).strip()
+                    if headline:  # Skip empty headlines
+                        valid_updates.append({
+                            "category": str(update["category"]),
+                            "headline": headline[:80],  # Enforce max length
+                            "sentiment": update.get("sentiment", "neutral"),
+                        })
             
             return valid_updates
             
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse Kimi JSON: {e}")
+            logger.error(f"Failed to parse Kimi JSON: {e}\nContent: {content[:200]}")
+            return []
+        except Exception as e:
+            logger.error(f"Unexpected error parsing headlines: {e}")
             return []
     
     def _generate_fallback_headlines(self, data: Dict) -> List[Dict]:
-        """Generate basic headlines from raw data (no AI)"""
+        """Generate basic headlines from raw data (no AI) - ALWAYS returns 6 categories"""
+        logger.info("Generating fallback headlines from raw data")
         updates = []
         
-        # Markets
+        # Markets - always include
         sp500 = data.get("markets", {}).get("S&P 500", {})
+        nasdaq = data.get("markets", {}).get("NASDAQ", {})
         if sp500:
-            direction = "rises" if sp500["change_percent"] >= 0 else "falls"
+            direction = "rises" if sp500.get("change_percent", 0) >= 0 else "falls"
+            pct = abs(sp500.get("change_percent", 0))
             updates.append({
                 "category": "Markets",
-                "headline": f"S&P 500 {direction} {abs(sp500['change_percent']):.1f}% in trading",
-                "sentiment": "positive" if sp500["change_percent"] >= 0 else "negative",
+                "headline": f"S&P 500 {direction} {pct:.1f}% in trading",
+                "sentiment": "positive" if sp500.get("change_percent", 0) >= 0 else "negative",
+            })
+        elif nasdaq:
+            direction = "rises" if nasdaq.get("change_percent", 0) >= 0 else "falls"
+            pct = abs(nasdaq.get("change_percent", 0))
+            updates.append({
+                "category": "Markets",
+                "headline": f"NASDAQ {direction} {pct:.1f}% in trading",
+                "sentiment": "positive" if nasdaq.get("change_percent", 0) >= 0 else "negative",
+            })
+        else:
+            updates.append({
+                "category": "Markets",
+                "headline": "Markets trading in mixed territory",
+                "sentiment": "neutral",
             })
         
-        # Crypto
+        # Crypto - always include
         btc = data.get("crypto", {}).get("Bitcoin", {})
-        if btc:
+        if btc and btc.get("price"):
             price_k = btc["price"] / 1000
-            direction = "up" if btc["change_percent"] >= 0 else "down"
+            direction = "up" if btc.get("change_percent", 0) >= 0 else "down"
+            pct = abs(btc.get("change_percent", 0))
             updates.append({
                 "category": "Crypto",
-                "headline": f"Bitcoin {direction} {abs(btc['change_percent']):.1f}% near ${price_k:.0f}K",
-                "sentiment": "positive" if btc["change_percent"] >= 0 else "negative",
+                "headline": f"Bitcoin {direction} {pct:.1f}% near ${price_k:.0f}K",
+                "sentiment": "positive" if btc.get("change_percent", 0) >= 0 else "negative",
+            })
+        else:
+            updates.append({
+                "category": "Crypto",
+                "headline": "Crypto markets showing mixed signals",
+                "sentiment": "neutral",
             })
         
-        # Economy
+        # Economy - always include
         treasury = data.get("treasury", {}).get("10Y Treasury", {})
-        if treasury:
+        if treasury and treasury.get("price"):
             updates.append({
                 "category": "Economy",
                 "headline": f"10-year Treasury yield at {treasury['price']:.2f}%",
                 "sentiment": "neutral",
             })
-        
-        # Tech
-        tech_top = data.get("tech", {}).get("top_mover", {})
-        if tech_top:
-            direction = "leads gains" if tech_top["change"] >= 0 else "leads decline"
+        else:
             updates.append({
-                "category": "Tech",
-                "headline": f"{tech_top['symbol']} {direction} with {abs(tech_top['change']):.1f}% move",
-                "sentiment": "positive" if tech_top["change"] >= 0 else "negative",
+                "category": "Economy",
+                "headline": "Economic indicators remain stable",
+                "sentiment": "neutral",
             })
         
-        # Commodities
-        gold = data.get("commodities", {}).get("Gold", {})
-        if gold:
-            direction = "rises" if gold["change_percent"] >= 0 else "falls"
-            updates.append({
-                "category": "Commodities",
-                "headline": f"Gold {direction} to ${gold['price']:,.0f} per ounce",
-                "sentiment": "positive" if gold["change_percent"] >= 0 else "negative",
-            })
-        
-        # Earnings (generic since we don't have specific data)
+        # Earnings - always include (generic)
         updates.append({
             "category": "Earnings",
             "headline": "Earnings season continues with mixed results",
             "sentiment": "neutral",
         })
         
+        # Tech - always include
+        tech_top = data.get("tech", {}).get("top_mover", {})
+        if tech_top and tech_top.get("symbol"):
+            direction = "leads gains" if tech_top.get("change", 0) >= 0 else "leads decline"
+            pct = abs(tech_top.get("change", 0))
+            updates.append({
+                "category": "Tech",
+                "headline": f"{tech_top['symbol']} {direction} with {pct:.1f}% move",
+                "sentiment": "positive" if tech_top.get("change", 0) >= 0 else "negative",
+            })
+        else:
+            updates.append({
+                "category": "Tech",
+                "headline": "Tech stocks trading in mixed territory",
+                "sentiment": "neutral",
+            })
+        
+        # Commodities - always include
+        gold = data.get("commodities", {}).get("Gold", {})
+        oil = data.get("commodities", {}).get("Oil (WTI)", {})
+        if gold and gold.get("price"):
+            direction = "rises" if gold.get("change_percent", 0) >= 0 else "falls"
+            updates.append({
+                "category": "Commodities",
+                "headline": f"Gold {direction} to ${gold['price']:,.0f} per ounce",
+                "sentiment": "positive" if gold.get("change_percent", 0) >= 0 else "negative",
+            })
+        elif oil and oil.get("price"):
+            direction = "rises" if oil.get("change_percent", 0) >= 0 else "falls"
+            updates.append({
+                "category": "Commodities",
+                "headline": f"Oil {direction} to ${oil['price']:.2f} per barrel",
+                "sentiment": "positive" if oil.get("change_percent", 0) >= 0 else "negative",
+            })
+        else:
+            updates.append({
+                "category": "Commodities",
+                "headline": "Commodities trading in narrow range",
+                "sentiment": "neutral",
+            })
+        
+        logger.info(f"Generated {len(updates)} fallback headlines")
         return updates
     
     def get_cache_status(self) -> Dict:
