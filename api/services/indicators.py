@@ -34,7 +34,7 @@ class IndicatorService:
         ma = self._calculate_moving_averages(closes, current_price)
         momentum = self._calculate_momentum(closes)
         volatility = self._calculate_volatility(closes, highs, lows, current_price)
-        volume = self._calculate_volume_analysis(volumes)
+        volume = self._calculate_volume_analysis(closes, highs, lows, volumes, current_price)
         price_levels = self._calculate_price_levels(closes, highs, lows, current_price)
         
         # Determine overall trend
@@ -150,8 +150,15 @@ class IndicatorService:
             atr_percent=atr_percent,
         )
     
-    def _calculate_volume_analysis(self, volumes: list[int]) -> VolumeAnalysis:
-        """Analyze volume patterns"""
+    def _calculate_volume_analysis(
+        self, 
+        closes: list[float],
+        highs: list[float],
+        lows: list[float],
+        volumes: list[int],
+        current_price: float,
+    ) -> VolumeAnalysis:
+        """Analyze volume patterns with advanced indicators"""
         
         if not volumes:
             return VolumeAnalysis(current_volume=0)
@@ -175,12 +182,64 @@ class IndicatorService:
         else:
             trend = None
         
+        # Calculate VWAP (Volume-Weighted Average Price)
+        vwap = self._calculate_vwap(closes, highs, lows, volumes)
+        price_vs_vwap = None
+        if vwap:
+            price_vs_vwap = "above" if current_price > vwap else "below"
+        
+        # Calculate OBV (On-Balance Volume)
+        obv, obv_trend = self._calculate_obv(closes, volumes)
+        
+        # Calculate MFI (Money Flow Index)
+        mfi = self._calculate_mfi(closes, highs, lows, volumes)
+        mfi_signal = None
+        if mfi is not None:
+            if mfi >= 80:
+                mfi_signal = "overbought"
+            elif mfi <= 20:
+                mfi_signal = "oversold"
+            else:
+                mfi_signal = "neutral"
+        
+        # Calculate Volume ROC (Rate of Change)
+        volume_roc = self._calculate_volume_roc(volumes)
+        volume_roc_signal = None
+        if volume_roc is not None:
+            if volume_roc > 50:
+                volume_roc_signal = "accelerating"
+            elif volume_roc < -30:
+                volume_roc_signal = "decelerating"
+            else:
+                volume_roc_signal = "stable"
+        
+        # Calculate CMF (Chaikin Money Flow)
+        cmf = self._calculate_cmf(closes, highs, lows, volumes)
+        cmf_signal = None
+        if cmf is not None:
+            if cmf > 0.1:
+                cmf_signal = "accumulation"
+            elif cmf < -0.1:
+                cmf_signal = "distribution"
+            else:
+                cmf_signal = "neutral"
+        
         return VolumeAnalysis(
             current_volume=current,
             avg_volume_20d=avg,
             volume_ratio=ratio,
             is_unusual=is_unusual,
             volume_trend=trend,
+            vwap=round(vwap, 2) if vwap else None,
+            price_vs_vwap=price_vs_vwap,
+            obv=obv,
+            obv_trend=obv_trend,
+            mfi=round(mfi, 2) if mfi else None,
+            mfi_signal=mfi_signal,
+            volume_roc=round(volume_roc, 2) if volume_roc else None,
+            volume_roc_signal=volume_roc_signal,
+            cmf=round(cmf, 4) if cmf else None,
+            cmf_signal=cmf_signal,
         )
     
     def _calculate_price_levels(
@@ -396,4 +455,209 @@ class IndicatorService:
             return None
         
         return sum(true_ranges[-ATR_PERIOD:]) / ATR_PERIOD
+    
+    # ═══════════════════════════════════════════════════════════════
+    # ADVANCED VOLUME INDICATORS
+    # ═══════════════════════════════════════════════════════════════
+    
+    def _calculate_vwap(
+        self, 
+        closes: list[float], 
+        highs: list[float], 
+        lows: list[float], 
+        volumes: list[int],
+        period: int = 20
+    ) -> Optional[float]:
+        """
+        Calculate Volume-Weighted Average Price (VWAP)
+        
+        VWAP = Cumulative(Typical Price × Volume) / Cumulative(Volume)
+        Typical Price = (High + Low + Close) / 3
+        
+        Used to identify institutional buying/selling levels
+        """
+        if len(closes) < period or len(volumes) < period:
+            return None
+        
+        # Use recent period for calculation
+        recent_highs = highs[-period:]
+        recent_lows = lows[-period:]
+        recent_closes = closes[-period:]
+        recent_volumes = volumes[-period:]
+        
+        cumulative_tp_vol = 0
+        cumulative_vol = 0
+        
+        for i in range(period):
+            typical_price = (recent_highs[i] + recent_lows[i] + recent_closes[i]) / 3
+            cumulative_tp_vol += typical_price * recent_volumes[i]
+            cumulative_vol += recent_volumes[i]
+        
+        if cumulative_vol == 0:
+            return None
+        
+        return cumulative_tp_vol / cumulative_vol
+    
+    def _calculate_obv(
+        self, 
+        closes: list[float], 
+        volumes: list[int]
+    ) -> tuple[Optional[float], Optional[str]]:
+        """
+        Calculate On-Balance Volume (OBV)
+        
+        OBV adds volume on up days, subtracts on down days.
+        Tracks cumulative buying/selling pressure.
+        
+        Returns: (current OBV, trend direction)
+        """
+        if len(closes) < 20 or len(volumes) < 20:
+            return None, None
+        
+        obv = 0
+        obv_values = [0]
+        
+        for i in range(1, len(closes)):
+            if closes[i] > closes[i-1]:
+                obv += volumes[i]
+            elif closes[i] < closes[i-1]:
+                obv -= volumes[i]
+            # If close unchanged, OBV stays the same
+            obv_values.append(obv)
+        
+        # Determine OBV trend (compare recent vs older)
+        if len(obv_values) >= 10:
+            recent_obv = sum(obv_values[-5:]) / 5
+            older_obv = sum(obv_values[-10:-5]) / 5
+            
+            if recent_obv > older_obv * 1.05:
+                trend = "accumulating"
+            elif recent_obv < older_obv * 0.95:
+                trend = "distributing"
+            else:
+                trend = "neutral"
+        else:
+            trend = None
+        
+        return obv, trend
+    
+    def _calculate_mfi(
+        self, 
+        closes: list[float], 
+        highs: list[float], 
+        lows: list[float], 
+        volumes: list[int],
+        period: int = 14
+    ) -> Optional[float]:
+        """
+        Calculate Money Flow Index (MFI)
+        
+        MFI is a volume-weighted RSI that measures buying/selling pressure.
+        Range: 0-100
+        - Above 80: Overbought (potential reversal down)
+        - Below 20: Oversold (potential reversal up)
+        
+        Better than RSI for detecting divergences with volume confirmation.
+        """
+        if len(closes) < period + 1:
+            return None
+        
+        # Calculate typical price and raw money flow
+        typical_prices = []
+        for i in range(len(closes)):
+            tp = (highs[i] + lows[i] + closes[i]) / 3
+            typical_prices.append(tp)
+        
+        # Calculate positive and negative money flow
+        positive_flow = 0
+        negative_flow = 0
+        
+        for i in range(-period, 0):
+            money_flow = typical_prices[i] * volumes[i]
+            
+            if typical_prices[i] > typical_prices[i-1]:
+                positive_flow += money_flow
+            elif typical_prices[i] < typical_prices[i-1]:
+                negative_flow += money_flow
+        
+        if negative_flow == 0:
+            return 100.0
+        
+        money_ratio = positive_flow / negative_flow
+        mfi = 100 - (100 / (1 + money_ratio))
+        
+        return mfi
+    
+    def _calculate_volume_roc(
+        self, 
+        volumes: list[int], 
+        period: int = 10
+    ) -> Optional[float]:
+        """
+        Calculate Volume Rate of Change (ROC)
+        
+        Measures % change in volume over a period.
+        Useful for detecting volume acceleration/deceleration.
+        
+        Returns: Percentage change in volume
+        """
+        if len(volumes) < period + 1:
+            return None
+        
+        current_vol = volumes[-1]
+        past_vol = volumes[-period-1]
+        
+        if past_vol == 0:
+            return None
+        
+        roc = ((current_vol - past_vol) / past_vol) * 100
+        return roc
+    
+    def _calculate_cmf(
+        self, 
+        closes: list[float], 
+        highs: list[float], 
+        lows: list[float], 
+        volumes: list[int],
+        period: int = 20
+    ) -> Optional[float]:
+        """
+        Calculate Chaikin Money Flow (CMF)
+        
+        CMF measures the amount of Money Flow Volume over a period.
+        Range: -1 to +1
+        - Positive: Buying pressure (accumulation)
+        - Negative: Selling pressure (distribution)
+        
+        Money Flow Multiplier = [(Close - Low) - (High - Close)] / (High - Low)
+        Money Flow Volume = MF Multiplier × Volume
+        CMF = Sum(MFV) / Sum(Volume)
+        """
+        if len(closes) < period:
+            return None
+        
+        mfv_sum = 0
+        vol_sum = 0
+        
+        for i in range(-period, 0):
+            high = highs[i]
+            low = lows[i]
+            close = closes[i]
+            volume = volumes[i]
+            
+            # Avoid division by zero
+            if high == low:
+                mf_multiplier = 0
+            else:
+                mf_multiplier = ((close - low) - (high - close)) / (high - low)
+            
+            mfv = mf_multiplier * volume
+            mfv_sum += mfv
+            vol_sum += volume
+        
+        if vol_sum == 0:
+            return None
+        
+        cmf = mfv_sum / vol_sum
+        return cmf
 

@@ -343,6 +343,156 @@ class AlphaService:
                 bullish_points += 5
         
         # ═══════════════════════════════════════════════════════════════
+        # ADVANCED VOLUME SIGNALS (from technicals.volume)
+        # ═══════════════════════════════════════════════════════════════
+        
+        tech_vol = technicals.volume
+        
+        # VWAP Signal
+        if tech_vol.vwap and tech_vol.price_vs_vwap:
+            if tech_vol.price_vs_vwap == "above" and quote.change_percent > 0:
+                signals.append({
+                    "name": "Above VWAP",
+                    "type": "bullish",
+                    "strength": 3,
+                    "description": f"Trading above VWAP (${tech_vol.vwap:.2f}) - institutional support"
+                })
+                bullish_points += 7
+            elif tech_vol.price_vs_vwap == "below" and quote.change_percent < 0:
+                signals.append({
+                    "name": "Below VWAP",
+                    "type": "bearish",
+                    "strength": 3,
+                    "description": f"Trading below VWAP (${tech_vol.vwap:.2f}) - institutional resistance"
+                })
+                bearish_points += 7
+        
+        # OBV Trend Signal
+        if tech_vol.obv_trend:
+            if tech_vol.obv_trend == "accumulating":
+                signals.append({
+                    "name": "OBV Accumulating",
+                    "type": "bullish",
+                    "strength": 4,
+                    "description": "On-Balance Volume rising - smart money buying"
+                })
+                bullish_points += 10
+            elif tech_vol.obv_trend == "distributing":
+                signals.append({
+                    "name": "OBV Distributing",
+                    "type": "bearish",
+                    "strength": 4,
+                    "description": "On-Balance Volume falling - smart money selling"
+                })
+                bearish_points += 10
+        
+        # MFI Signal (volume-weighted RSI)
+        if tech_vol.mfi is not None:
+            if tech_vol.mfi <= 20:
+                signals.append({
+                    "name": "MFI Oversold",
+                    "type": "bullish",
+                    "strength": 4,
+                    "description": f"Money Flow Index at {tech_vol.mfi:.0f} - volume confirms oversold"
+                })
+                bullish_points += 10
+            elif tech_vol.mfi >= 80:
+                signals.append({
+                    "name": "MFI Overbought",
+                    "type": "bearish",
+                    "strength": 4,
+                    "description": f"Money Flow Index at {tech_vol.mfi:.0f} - volume confirms overbought"
+                })
+                bearish_points += 10
+            elif 50 <= tech_vol.mfi <= 70:
+                signals.append({
+                    "name": "MFI Bullish Zone",
+                    "type": "bullish",
+                    "strength": 2,
+                    "description": f"Money Flow Index at {tech_vol.mfi:.0f} - healthy buying pressure"
+                })
+                bullish_points += 5
+        
+        # Volume ROC Signal
+        if tech_vol.volume_roc is not None:
+            if tech_vol.volume_roc > 100 and quote.change_percent > 2:
+                signals.append({
+                    "name": "Volume Acceleration",
+                    "type": "bullish",
+                    "strength": 5,
+                    "description": f"Volume up {tech_vol.volume_roc:.0f}% - explosive move"
+                })
+                bullish_points += 12
+            elif tech_vol.volume_roc > 100 and quote.change_percent < -2:
+                signals.append({
+                    "name": "Panic Selling",
+                    "type": "bearish",
+                    "strength": 5,
+                    "description": f"Volume up {tech_vol.volume_roc:.0f}% on selloff - capitulation?"
+                })
+                bearish_points += 12
+            elif tech_vol.volume_roc < -50:
+                signals.append({
+                    "name": "Volume Dry Up",
+                    "type": "neutral",
+                    "strength": 2,
+                    "description": f"Volume down {abs(tech_vol.volume_roc):.0f}% - low interest"
+                })
+        
+        # CMF Signal (Chaikin Money Flow)
+        if tech_vol.cmf is not None:
+            if tech_vol.cmf > 0.25:
+                signals.append({
+                    "name": "Strong Accumulation (CMF)",
+                    "type": "bullish",
+                    "strength": 4,
+                    "description": f"Chaikin MF at {tech_vol.cmf:.2f} - heavy buying pressure"
+                })
+                bullish_points += 10
+            elif tech_vol.cmf < -0.25:
+                signals.append({
+                    "name": "Strong Distribution (CMF)",
+                    "type": "bearish",
+                    "strength": 4,
+                    "description": f"Chaikin MF at {tech_vol.cmf:.2f} - heavy selling pressure"
+                })
+                bearish_points += 10
+            elif tech_vol.cmf > 0.1:
+                signals.append({
+                    "name": "CMF Accumulation",
+                    "type": "bullish",
+                    "strength": 2,
+                    "description": f"Chaikin MF at {tech_vol.cmf:.2f} - modest buying"
+                })
+                bullish_points += 5
+            elif tech_vol.cmf < -0.1:
+                signals.append({
+                    "name": "CMF Distribution",
+                    "type": "bearish",
+                    "strength": 2,
+                    "description": f"Chaikin MF at {tech_vol.cmf:.2f} - modest selling"
+                })
+                bearish_points += 5
+        
+        # Volume Divergence Detection (price up but volume indicators negative)
+        if tech_vol.obv_trend == "distributing" and quote.change_percent > 1:
+            signals.append({
+                "name": "Bearish Volume Divergence",
+                "type": "bearish",
+                "strength": 4,
+                "description": "Price rising but OBV falling - weak rally"
+            })
+            bearish_points += 10
+        elif tech_vol.obv_trend == "accumulating" and quote.change_percent < -1:
+            signals.append({
+                "name": "Bullish Volume Divergence",
+                "type": "bullish",
+                "strength": 4,
+                "description": "Price falling but OBV rising - accumulation on dip"
+            })
+            bullish_points += 10
+        
+        # ═══════════════════════════════════════════════════════════════
         # VOLATILITY SIGNALS  
         # ═══════════════════════════════════════════════════════════════
         
@@ -486,6 +636,47 @@ class AlphaService:
                         "description": f"{put_unusual} unusual put sweeps detected"
                     })
                     bearish_points += 12
+            
+            # Options volume intensity signal
+            if options.volume_signal:
+                if options.volume_signal == "unusually_high":
+                    signals.append({
+                        "name": "Extreme Options Activity",
+                        "type": "neutral",
+                        "strength": 5,
+                        "description": f"Options volume {options.volume_vs_oi_ratio:.1%} of OI - big move expected"
+                    })
+                    # Could go either way - check put/call for direction
+                    if options.put_call_ratio and options.put_call_ratio < 0.8:
+                        bullish_points += 8
+                    elif options.put_call_ratio and options.put_call_ratio > 1.2:
+                        bearish_points += 8
+                elif options.volume_signal == "high":
+                    signals.append({
+                        "name": "High Options Activity",
+                        "type": "neutral",
+                        "strength": 3,
+                        "description": f"Options volume elevated - increased interest"
+                    })
+            
+            # Call vs Put volume directional signal
+            if options.call_volume_vs_put_volume:
+                if options.call_volume_vs_put_volume > 3:
+                    signals.append({
+                        "name": "Heavy Call Volume",
+                        "type": "bullish",
+                        "strength": 4,
+                        "description": f"Call volume {options.call_volume_vs_put_volume:.1f}x put volume"
+                    })
+                    bullish_points += 10
+                elif options.call_volume_vs_put_volume < 0.33:
+                    signals.append({
+                        "name": "Heavy Put Volume",
+                        "type": "bearish",
+                        "strength": 4,
+                        "description": f"Put volume {1/options.call_volume_vs_put_volume:.1f}x call volume"
+                    })
+                    bearish_points += 10
         
         # ═══════════════════════════════════════════════════════════════
         # NEWS/CATALYST SIGNALS

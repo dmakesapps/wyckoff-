@@ -71,6 +71,18 @@ class VolumeAnalysis(BaseModel):
     volume_ratio: Optional[float] = None  # current / average
     is_unusual: bool = False
     volume_trend: Optional[str] = None  # "increasing", "decreasing", "stable"
+    
+    # Advanced volume indicators
+    vwap: Optional[float] = None  # Volume-Weighted Average Price
+    price_vs_vwap: Optional[str] = None  # "above", "below"
+    obv: Optional[float] = None  # On-Balance Volume
+    obv_trend: Optional[str] = None  # "accumulating", "distributing", "neutral"
+    mfi: Optional[float] = None  # Money Flow Index (0-100)
+    mfi_signal: Optional[str] = None  # "overbought", "oversold", "neutral"
+    volume_roc: Optional[float] = None  # Volume Rate of Change (%)
+    volume_roc_signal: Optional[str] = None  # "accelerating", "decelerating", "stable"
+    cmf: Optional[float] = None  # Chaikin Money Flow (-1 to 1)
+    cmf_signal: Optional[str] = None  # "accumulation", "distribution", "neutral"
 
 
 class PriceLevels(BaseModel):
@@ -128,6 +140,13 @@ class OptionsData(BaseModel):
     unusual_activity: list[dict] = []
     nearest_expiry_calls: list[OptionContract] = []
     nearest_expiry_puts: list[OptionContract] = []
+    
+    # Volume analysis
+    total_options_volume: int = 0
+    volume_vs_oi_ratio: Optional[float] = None  # Total volume / total OI
+    volume_signal: Optional[str] = None  # "unusually_high", "high", "normal", "low"
+    call_volume_vs_put_volume: Optional[float] = None  # Ratio
+    oi_change_signal: Optional[str] = None  # "building", "unwinding", "stable"
 
 
 # ═══════════════════════════════════════════════════════════════

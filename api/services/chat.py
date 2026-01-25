@@ -125,6 +125,186 @@ AVAILABLE_TOOLS = [
                 "required": []
             }
         }
+    },
+    # ═══════════════════════════════════════════════════════════════
+    # MARKET SCANNER TOOLS (query pre-scanned data)
+    # ═══════════════════════════════════════════════════════════════
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_unusual_volume",
+            "description": "Find stocks with unusual trading volume (2x+ normal). Use this to find stocks with volume spikes, potential breakouts, or unusual activity. Can filter by market cap (micro, small, mid, large, mega).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_rvol": {
+                        "type": "number",
+                        "description": "Minimum relative volume (e.g., 2.0 = 2x average volume)",
+                        "default": 2.0
+                    },
+                    "market_cap_category": {
+                        "type": "string",
+                        "description": "Filter by market cap: 'micro', 'small', 'mid', 'large', 'mega'",
+                        "enum": ["micro", "small", "mid", "large", "mega"]
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of results to return",
+                        "default": 20
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_top_movers",
+            "description": "Find top gaining or losing stocks today. Use this to find the biggest movers in the market.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {
+                        "type": "string",
+                        "description": "'gainers' or 'losers'",
+                        "enum": ["gainers", "losers"],
+                        "default": "gainers"
+                    },
+                    "market_cap_category": {
+                        "type": "string",
+                        "description": "Filter by market cap: 'micro', 'small', 'mid', 'large', 'mega'",
+                        "enum": ["micro", "small", "mid", "large", "mega"]
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of results to return",
+                        "default": 20
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_breakout_candidates",
+            "description": "Find stocks near their 52-week high (potential breakouts) or 52-week low (potential value plays or falling knives).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "description": "'near_high' (within 5% of 52w high) or 'near_low' (within 10% of 52w low)",
+                        "enum": ["near_high", "near_low"],
+                        "default": "near_high"
+                    },
+                    "market_cap_category": {
+                        "type": "string",
+                        "description": "Filter by market cap: 'micro', 'small', 'mid', 'large', 'mega'",
+                        "enum": ["micro", "small", "mid", "large", "mega"]
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of results to return",
+                        "default": 20
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "scan_by_sector",
+            "description": "Find stocks in a specific sector. Useful for sector analysis or rotation strategies.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sector": {
+                        "type": "string",
+                        "description": "Sector name (e.g., 'Technology', 'Healthcare', 'Financial Services', 'Energy', 'Consumer Cyclical')"
+                    },
+                    "sort_by": {
+                        "type": "string",
+                        "description": "Sort by: 'change_percent', 'relative_volume', 'volume', 'market_cap'",
+                        "enum": ["change_percent", "relative_volume", "volume", "market_cap"],
+                        "default": "change_percent"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of results to return",
+                        "default": 20
+                    }
+                },
+                "required": ["sector"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_market",
+            "description": "Advanced market search with multiple filters. Find stocks matching specific criteria.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "min_price": {
+                        "type": "number",
+                        "description": "Minimum stock price"
+                    },
+                    "max_price": {
+                        "type": "number",
+                        "description": "Maximum stock price"
+                    },
+                    "min_volume": {
+                        "type": "integer",
+                        "description": "Minimum trading volume"
+                    },
+                    "min_rvol": {
+                        "type": "number",
+                        "description": "Minimum relative volume"
+                    },
+                    "min_change": {
+                        "type": "number",
+                        "description": "Minimum price change %"
+                    },
+                    "max_change": {
+                        "type": "number",
+                        "description": "Maximum price change %"
+                    },
+                    "market_cap_category": {
+                        "type": "string",
+                        "description": "Market cap: 'micro', 'small', 'mid', 'large', 'mega'",
+                        "enum": ["micro", "small", "mid", "large", "mega"]
+                    },
+                    "sector": {
+                        "type": "string",
+                        "description": "Sector name"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of results",
+                        "default": 50
+                    }
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_market_overview",
+            "description": "Get a summary of current market conditions including counts of unusual volume stocks, big movers, breakout candidates, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
@@ -140,19 +320,30 @@ SYSTEM_PROMPT = """You are Alpha, an elite AI investment analyst assistant. You 
 - Real-time market data access
 
 ## Your Capabilities
-You have access to real-time tools to fetch:
-- Stock prices and quotes
-- Technical analysis (SMA, RSI, MACD, Bollinger Bands)
-- Options flow and unusual activity
-- News with sentiment analysis
-- Volume metrics and alpha signals
+
+### MARKET SCANNER (use for finding stocks)
+You have access to a pre-scanned database of 1000+ stocks updated every 30 minutes:
+- `scan_unusual_volume` - Find stocks with volume spikes (2x+ normal)
+- `scan_top_movers` - Find biggest gainers/losers today
+- `scan_breakout_candidates` - Find stocks near 52-week highs/lows
+- `scan_by_sector` - Find stocks in specific sectors
+- `search_market` - Advanced search with multiple filters
+- `get_market_overview` - Get summary of market conditions
+
+### DEEP ANALYSIS (use for specific stocks)
+For detailed analysis of individual stocks:
+- `get_stock_analysis` - Full technicals, options, news, AI insights
+- `get_stock_quote` - Quick price check
+- `get_stock_news` - Recent news with sentiment
+- `get_options_flow` - Options chain and unusual activity
 
 ## How to Respond
-1. **Use your tools** - When users ask about stocks, ALWAYS fetch real data first
-2. **Cite sources** - Reference news articles with [1], [2] when discussing catalysts
-3. **Be specific** - Use actual numbers, prices, and percentages
-4. **First principles** - Explain the WHY, not just the WHAT
-5. **Risk aware** - Always mention risks and what could go wrong
+1. **For market-wide questions** ("find unusual volume", "what's moving today") - Use SCANNER tools first
+2. **For specific stocks** ("analyze AAPL", "why is TSLA up") - Use ANALYSIS tools
+3. **Cite sources** - Reference news articles with [1], [2] when discussing catalysts
+4. **Be specific** - Use actual numbers, prices, and percentages
+5. **First principles** - Explain the WHY, not just the WHAT
+6. **Risk aware** - Always mention risks and what could go wrong
 
 ## Response Format
 - Start with the key insight/answer
@@ -160,10 +351,15 @@ You have access to real-time tools to fetch:
 - End with actionable recommendation or key levels to watch
 - Keep responses concise but informative
 
-## Example
-User: "Why is NVDA up today?"
-You: [Call get_stock_analysis("NVDA") and get_stock_news("NVDA")]
-Then synthesize: "NVDA is up 3.2% to $485 on strong volume (1.5x average)..."
+## Examples
+
+User: "Find microcap stocks with unusual volume"
+You: [Call scan_unusual_volume(market_cap_category="micro")]
+Then: "Found 15 microcaps with 2x+ volume today. Top picks: ABC (+12%, 4.5x vol), XYZ..."
+
+User: "Analyze NVDA"
+You: [Call get_stock_analysis("NVDA")]
+Then: "NVDA is trading at $485, up 3.2% on strong volume (1.5x average)..."
 
 Remember: You're talking to traders who want actionable insights, not generic advice."""
 

@@ -23,6 +23,10 @@ from api.services.kimi import KimiService
 from api.services.alpha import AlphaService
 from api.services.chat import ChatService
 
+# Scanner imports
+from api.scanner.database import ScannerDB
+from api.scanner.scheduler import start_scheduler, get_scheduler
+
 
 # ═══════════════════════════════════════════════════════════════
 # APP SETUP
@@ -50,6 +54,9 @@ options_service = OptionsService()
 news_service = NewsService()
 kimi_service = KimiService()
 alpha_service = AlphaService()
+
+# Initialize scanner database
+scanner_db = ScannerDB()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -198,6 +205,172 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
                 ],
             }
         
+        # ═══════════════════════════════════════════════════════════════
+        # SCANNER TOOLS
+        # ═══════════════════════════════════════════════════════════════
+        
+        elif tool_name == "scan_unusual_volume":
+            min_rvol = arguments.get("min_rvol", 2.0)
+            market_cap = arguments.get("market_cap_category")
+            limit = arguments.get("limit", 20)
+            
+            results = scanner_db.get_unusual_volume(
+                min_rvol=min_rvol,
+                limit=limit,
+                market_cap_category=market_cap
+            )
+            
+            return {
+                "count": len(results),
+                "filter": f"RVOL >= {min_rvol}x" + (f", {market_cap} cap" if market_cap else ""),
+                "stocks": [
+                    {
+                        "symbol": r["symbol"],
+                        "company": r["company_name"],
+                        "price": r["price"],
+                        "change_pct": r["change_percent"],
+                        "volume": r["volume"],
+                        "rvol": r["relative_volume"],
+                        "market_cap": r["market_cap_category"],
+                    }
+                    for r in results
+                ]
+            }
+        
+        elif tool_name == "scan_top_movers":
+            direction = arguments.get("direction", "gainers")
+            market_cap = arguments.get("market_cap_category")
+            limit = arguments.get("limit", 20)
+            
+            if direction == "gainers":
+                results = scanner_db.get_top_gainers(limit=limit, market_cap_category=market_cap)
+            else:
+                results = scanner_db.get_top_losers(limit=limit, market_cap_category=market_cap)
+            
+            return {
+                "count": len(results),
+                "type": direction,
+                "filter": f"{market_cap} cap" if market_cap else "all",
+                "stocks": [
+                    {
+                        "symbol": r["symbol"],
+                        "company": r["company_name"],
+                        "price": r["price"],
+                        "change_pct": r["change_percent"],
+                        "volume": r["volume"],
+                        "rvol": r["relative_volume"],
+                    }
+                    for r in results
+                ]
+            }
+        
+        elif tool_name == "scan_breakout_candidates":
+            scan_type = arguments.get("type", "near_high")
+            market_cap = arguments.get("market_cap_category")
+            limit = arguments.get("limit", 20)
+            
+            if scan_type == "near_high":
+                results = scanner_db.get_near_52w_high(limit=limit, market_cap_category=market_cap)
+            else:
+                results = scanner_db.get_near_52w_low(limit=limit, market_cap_category=market_cap)
+            
+            return {
+                "count": len(results),
+                "type": scan_type,
+                "stocks": [
+                    {
+                        "symbol": r["symbol"],
+                        "company": r["company_name"],
+                        "price": r["price"],
+                        "change_pct": r["change_percent"],
+                        "distance_52w_high": r["distance_from_52w_high"],
+                        "distance_52w_low": r["distance_from_52w_low"],
+                        "rvol": r["relative_volume"],
+                    }
+                    for r in results
+                ]
+            }
+        
+        elif tool_name == "scan_by_sector":
+            sector = arguments.get("sector", "Technology")
+            sort_by = arguments.get("sort_by", "change_percent")
+            limit = arguments.get("limit", 20)
+            
+            results = scanner_db.get_by_sector(sector=sector, sort_by=sort_by, limit=limit)
+            
+            return {
+                "sector": sector,
+                "count": len(results),
+                "sorted_by": sort_by,
+                "stocks": [
+                    {
+                        "symbol": r["symbol"],
+                        "company": r["company_name"],
+                        "price": r["price"],
+                        "change_pct": r["change_percent"],
+                        "volume": r["volume"],
+                        "rvol": r["relative_volume"],
+                    }
+                    for r in results
+                ]
+            }
+        
+        elif tool_name == "search_market":
+            results = scanner_db.search_stocks(
+                min_price=arguments.get("min_price"),
+                max_price=arguments.get("max_price"),
+                min_volume=arguments.get("min_volume"),
+                min_rvol=arguments.get("min_rvol"),
+                max_rvol=arguments.get("max_rvol"),
+                min_change=arguments.get("min_change"),
+                max_change=arguments.get("max_change"),
+                market_cap_category=arguments.get("market_cap_category"),
+                sector=arguments.get("sector"),
+                limit=arguments.get("limit", 50)
+            )
+            
+            return {
+                "count": len(results),
+                "filters": {k: v for k, v in arguments.items() if v is not None},
+                "stocks": [
+                    {
+                        "symbol": r["symbol"],
+                        "company": r["company_name"],
+                        "price": r["price"],
+                        "change_pct": r["change_percent"],
+                        "volume": r["volume"],
+                        "rvol": r["relative_volume"],
+                        "sector": r["sector"],
+                        "market_cap": r["market_cap_category"],
+                    }
+                    for r in results
+                ]
+            }
+        
+        elif tool_name == "get_market_overview":
+            stats = scanner_db.get_summary_stats()
+            
+            # Get some examples
+            unusual_vol = scanner_db.get_unusual_volume(limit=5)
+            top_gainers = scanner_db.get_top_gainers(limit=5)
+            top_losers = scanner_db.get_top_losers(limit=5)
+            
+            return {
+                "summary": stats,
+                "top_unusual_volume": [
+                    {"symbol": s["symbol"], "rvol": s["relative_volume"], "change": s["change_percent"]}
+                    for s in unusual_vol
+                ],
+                "top_gainers": [
+                    {"symbol": s["symbol"], "change": s["change_percent"]}
+                    for s in top_gainers
+                ],
+                "top_losers": [
+                    {"symbol": s["symbol"], "change": s["change_percent"]}
+                    for s in top_losers
+                ],
+            }
+        
         else:
             return {"error": f"Unknown tool: {tool_name}"}
             
@@ -210,16 +383,53 @@ chat_service = ChatService(tool_executor=execute_tool)
 
 
 # ═══════════════════════════════════════════════════════════════
+# STARTUP/SHUTDOWN EVENTS
+# ═══════════════════════════════════════════════════════════════
+
+@app.on_event("startup")
+async def startup_event():
+    """Start background scanner on server startup"""
+    print("🚀 Starting Alpha Discovery API...")
+    print("   Docs: http://localhost:8000/docs")
+    print("   Health: http://localhost:8000/api/health")
+    print("")
+    
+    # Start the scanner scheduler
+    try:
+        scheduler = start_scheduler()
+        print(f"🔄 Scanner scheduler started (every {scheduler.interval_minutes} mins)")
+        print("   First scan will begin shortly...")
+    except Exception as e:
+        print(f"⚠️  Scanner failed to start: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Stop scanner on shutdown"""
+    from api.scanner.scheduler import stop_scheduler
+    stop_scheduler()
+    print("Scanner stopped")
+
+
+# ═══════════════════════════════════════════════════════════════
 # HEALTH CHECK
 # ═══════════════════════════════════════════════════════════════
 
 @app.get("/api/health")
 async def health_check():
     """API health check endpoint"""
+    scheduler = get_scheduler()
+    scanner_status = scheduler.get_status() if scheduler else {}
+    
     return {
         "status": "healthy",
         "version": API_VERSION,
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "scanner": {
+            "running": scanner_status.get("running", False),
+            "last_scan": scanner_status.get("last_scan"),
+            "stocks_in_db": scanner_status.get("db_stats", {}).get("total_stocks", 0),
+        }
     }
 
 
@@ -719,6 +929,469 @@ async def get_market_news(limit: int = Query(15, ge=1, le=50)):
             for i, article in enumerate(unique_articles[:limit])
         ],
         "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
+# SCANNER ENDPOINTS
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/scanner/status")
+async def get_scanner_status():
+    """Get current scanner status and statistics"""
+    scheduler = get_scheduler()
+    return scheduler.get_status()
+
+
+@app.post("/api/scanner/trigger")
+async def trigger_scan():
+    """Manually trigger a market scan"""
+    scheduler = get_scheduler()
+    return scheduler.trigger_scan_now()
+
+
+@app.get("/api/scanner/unusual-volume")
+async def get_unusual_volume_stocks(
+    min_rvol: float = Query(2.0, description="Minimum relative volume"),
+    market_cap: str = Query(None, description="Market cap category"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """Get stocks with unusual trading volume"""
+    results = scanner_db.get_unusual_volume(
+        min_rvol=min_rvol,
+        limit=limit,
+        market_cap_category=market_cap
+    )
+    return {"count": len(results), "stocks": results}
+
+
+@app.get("/api/scanner/top-movers")
+async def get_top_movers(
+    direction: str = Query("gainers", description="'gainers' or 'losers'"),
+    market_cap: str = Query(None, description="Market cap category"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """Get top gaining or losing stocks"""
+    if direction == "gainers":
+        results = scanner_db.get_top_gainers(limit=limit, market_cap_category=market_cap)
+    else:
+        results = scanner_db.get_top_losers(limit=limit, market_cap_category=market_cap)
+    return {"direction": direction, "count": len(results), "stocks": results}
+
+
+@app.get("/api/scanner/breakouts")
+async def get_breakout_candidates(
+    type: str = Query("near_high", description="'near_high' or 'near_low'"),
+    market_cap: str = Query(None, description="Market cap category"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """Get stocks near 52-week high or low"""
+    if type == "near_high":
+        results = scanner_db.get_near_52w_high(limit=limit, market_cap_category=market_cap)
+    else:
+        results = scanner_db.get_near_52w_low(limit=limit, market_cap_category=market_cap)
+    return {"type": type, "count": len(results), "stocks": results}
+
+
+@app.get("/api/scanner/sector/{sector}")
+async def get_sector_stocks(
+    sector: str,
+    sort_by: str = Query("change_percent", description="Sort field"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """Get stocks in a specific sector"""
+    results = scanner_db.get_by_sector(sector=sector, sort_by=sort_by, limit=limit)
+    return {"sector": sector, "count": len(results), "stocks": results}
+
+
+# ═══════════════════════════════════════════════════════════════
+# FINVIZ-STYLE ENDPOINTS
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/market/overview")
+async def get_market_overview():
+    """
+    Complete market overview like Finviz homepage
+    
+    Returns:
+    - Market breadth (advancing/declining/unchanged)
+    - New highs and lows
+    - Sector performance summary
+    - Top gainers/losers preview
+    - Unusual volume preview
+    """
+    overview = scanner_db.get_finviz_style_overview()
+    
+    # Add top movers preview
+    overview["top_gainers"] = scanner_db.get_top_gainers(limit=10)
+    overview["top_losers"] = scanner_db.get_top_losers(limit=10)
+    overview["most_active"] = scanner_db.get_most_active(limit=10)
+    overview["unusual_volume"] = scanner_db.get_unusual_volume(limit=10)
+    
+    overview["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    return overview
+
+
+@app.get("/api/market/gainers")
+async def get_market_gainers(
+    limit: int = Query(50, ge=1, le=200),
+    min_volume: int = Query(100000, description="Minimum volume filter"),
+    market_cap: str = Query(None, description="Market cap category filter")
+):
+    """
+    Top gaining stocks - like Finviz Top Gainers
+    
+    Returns stocks sorted by % change (descending)
+    """
+    results = scanner_db.get_top_gainers(
+        limit=limit, 
+        min_volume=min_volume,
+        market_cap_category=market_cap
+    )
+    
+    # Format for frontend
+    stocks = [{
+        "rank": i + 1,
+        "ticker": r["symbol"],
+        "company": r["company_name"],
+        "last": r["price"],
+        "change": r["change_percent"],
+        "volume": r["volume"],
+        "relativeVolume": r["relative_volume"],
+        "marketCap": r["market_cap"],
+        "sector": r["sector"],
+        "signal": "Top Gainers" if r["change_percent"] >= 10 else "Gainers"
+    } for i, r in enumerate(results)]
+    
+    return {
+        "count": len(stocks),
+        "stocks": stocks,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/market/losers")
+async def get_market_losers(
+    limit: int = Query(50, ge=1, le=200),
+    min_volume: int = Query(100000, description="Minimum volume filter"),
+    market_cap: str = Query(None, description="Market cap category filter")
+):
+    """
+    Top losing stocks - like Finviz Top Losers
+    
+    Returns stocks sorted by % change (ascending, most negative first)
+    """
+    results = scanner_db.get_top_losers(
+        limit=limit,
+        min_volume=min_volume,
+        market_cap_category=market_cap
+    )
+    
+    # Format for frontend
+    stocks = [{
+        "rank": i + 1,
+        "ticker": r["symbol"],
+        "company": r["company_name"],
+        "last": r["price"],
+        "change": r["change_percent"],
+        "volume": r["volume"],
+        "relativeVolume": r["relative_volume"],
+        "marketCap": r["market_cap"],
+        "sector": r["sector"],
+        "signal": "Top Losers" if r["change_percent"] <= -10 else "Losers"
+    } for i, r in enumerate(results)]
+    
+    return {
+        "count": len(stocks),
+        "stocks": stocks,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/market/most-active")
+async def get_most_active(
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Most active stocks by volume - like Finviz Most Active
+    """
+    results = scanner_db.get_most_active(limit=limit)
+    
+    stocks = [{
+        "rank": i + 1,
+        "ticker": r["symbol"],
+        "company": r["company_name"],
+        "last": r["price"],
+        "change": r["change_percent"],
+        "volume": r["volume"],
+        "relativeVolume": r["relative_volume"],
+        "marketCap": r["market_cap"],
+        "sector": r["sector"],
+        "signal": "Most Active"
+    } for i, r in enumerate(results)]
+    
+    return {
+        "count": len(stocks),
+        "stocks": stocks,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/market/most-volatile")
+async def get_most_volatile(
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Most volatile stocks (biggest % moves in either direction)
+    """
+    results = scanner_db.get_most_volatile(limit=limit)
+    
+    stocks = [{
+        "rank": i + 1,
+        "ticker": r["symbol"],
+        "company": r["company_name"],
+        "last": r["price"],
+        "change": r["change_percent"],
+        "absChange": abs(r["change_percent"]) if r["change_percent"] else 0,
+        "volume": r["volume"],
+        "relativeVolume": r["relative_volume"],
+        "marketCap": r["market_cap"],
+        "sector": r["sector"],
+        "signal": "Most Volatile"
+    } for i, r in enumerate(results)]
+    
+    return {
+        "count": len(stocks),
+        "stocks": stocks,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/market/heatmap")
+async def get_heatmap():
+    """
+    Sector heatmap data - like Finviz S&P 500 Map
+    
+    Returns stocks organized by sector with performance data
+    for building a treemap/heatmap visualization
+    """
+    sectors = scanner_db.get_heatmap_data(limit_per_sector=30)
+    sector_performance = scanner_db.get_sector_performance()
+    
+    return {
+        "sectors": sectors,
+        "sectorSummary": sector_performance,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/market/sectors")
+async def get_sectors_performance():
+    """
+    Sector performance summary
+    
+    Returns average change, stock count, and volume for each sector
+    """
+    sectors = scanner_db.get_sector_performance()
+    
+    return {
+        "sectors": sectors,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/market/breadth")
+async def get_market_breadth():
+    """
+    Market breadth indicators
+    
+    Returns:
+    - Advancing vs declining stocks
+    - New highs vs new lows
+    - Advance/decline ratio
+    """
+    breadth = scanner_db.get_market_breadth()
+    sma = scanner_db.get_above_below_sma()
+    
+    return {
+        **breadth,
+        "sma_analysis": sma,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/market/headlines")
+async def get_top_headlines(
+    limit: int = Query(20, ge=1, le=50)
+):
+    """
+    Top market headlines - aggregated from major indices
+    
+    Returns the most important/recent market news headlines
+    """
+    # Fetch from multiple sources
+    spy_news = news_service.get_news("SPY", limit=limit)
+    qqq_news = news_service.get_news("QQQ", limit=limit // 2)
+    dia_news = news_service.get_news("DIA", limit=limit // 2)
+    
+    all_articles = []
+    
+    if spy_news:
+        all_articles.extend(spy_news.articles)
+    if qqq_news:
+        all_articles.extend(qqq_news.articles)
+    if dia_news:
+        all_articles.extend(dia_news.articles)
+    
+    # Deduplicate and sort by date
+    seen_titles = set()
+    unique_articles = []
+    for article in sorted(all_articles, key=lambda x: x.published_at, reverse=True):
+        # Simple dedup by checking if title is similar
+        title_key = article.title.lower()[:50]
+        if title_key not in seen_titles:
+            seen_titles.add(title_key)
+            unique_articles.append(article)
+    
+    # Format headlines
+    headlines = [{
+        "id": i + 1,
+        "title": article.title,
+        "source": article.source,
+        "url": article.url,
+        "published": article.published_at.isoformat(),
+        "sentiment": article.sentiment,
+        "age": _get_time_ago(article.published_at),
+    } for i, article in enumerate(unique_articles[:limit])]
+    
+    # Overall market sentiment
+    sentiments = [a.sentiment for a in unique_articles[:limit]]
+    pos = sentiments.count("positive")
+    neg = sentiments.count("negative")
+    overall = "bullish" if pos > neg * 1.5 else "bearish" if neg > pos * 1.5 else "neutral"
+    
+    return {
+        "headlines": headlines,
+        "count": len(headlines),
+        "marketSentiment": overall,
+        "sentimentBreakdown": {
+            "positive": pos,
+            "negative": neg,
+            "neutral": len(sentiments) - pos - neg
+        },
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+def _get_time_ago(dt: datetime) -> str:
+    """Convert datetime to human-readable 'time ago' string"""
+    now = datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    
+    diff = now - dt
+    seconds = diff.total_seconds()
+    
+    if seconds < 60:
+        return "just now"
+    elif seconds < 3600:
+        mins = int(seconds // 60)
+        return f"{mins}m ago"
+    elif seconds < 86400:
+        hours = int(seconds // 3600)
+        return f"{hours}h ago"
+    else:
+        days = int(seconds // 86400)
+        return f"{days}d ago"
+
+
+@app.get("/api/market/new-highs")
+async def get_new_highs(
+    limit: int = Query(50, ge=1, le=200),
+    market_cap: str = Query(None, description="Market cap category filter")
+):
+    """Stocks at or near 52-week highs"""
+    results = scanner_db.get_near_52w_high(max_distance=2.0, limit=limit, market_cap_category=market_cap)
+    
+    stocks = [{
+        "rank": i + 1,
+        "ticker": r["symbol"],
+        "company": r["company_name"],
+        "last": r["price"],
+        "change": r["change_percent"],
+        "high52w": r["week_52_high"],
+        "distanceFromHigh": r["distance_from_52w_high"],
+        "volume": r["volume"],
+        "sector": r["sector"],
+        "signal": "New High" if r["distance_from_52w_high"] and r["distance_from_52w_high"] >= -1 else "Near High"
+    } for i, r in enumerate(results)]
+    
+    return {
+        "count": len(stocks),
+        "stocks": stocks,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/market/new-lows")
+async def get_new_lows(
+    limit: int = Query(50, ge=1, le=200),
+    market_cap: str = Query(None, description="Market cap category filter")
+):
+    """Stocks at or near 52-week lows"""
+    results = scanner_db.get_near_52w_low(max_distance=5.0, limit=limit, market_cap_category=market_cap)
+    
+    stocks = [{
+        "rank": i + 1,
+        "ticker": r["symbol"],
+        "company": r["company_name"],
+        "last": r["price"],
+        "change": r["change_percent"],
+        "low52w": r["week_52_low"],
+        "distanceFromLow": r["distance_from_52w_low"],
+        "volume": r["volume"],
+        "sector": r["sector"],
+        "signal": "New Low" if r["distance_from_52w_low"] and r["distance_from_52w_low"] <= 1 else "Near Low"
+    } for i, r in enumerate(results)]
+    
+    return {
+        "count": len(stocks),
+        "stocks": stocks,
+        "updated_at": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/market/unusual-volume")
+async def get_unusual_volume(
+    limit: int = Query(50, ge=1, le=200),
+    min_rvol: float = Query(2.0, description="Minimum relative volume multiplier"),
+    market_cap: str = Query(None, description="Market cap category filter")
+):
+    """Stocks with unusual trading volume"""
+    results = scanner_db.get_unusual_volume(
+        min_rvol=min_rvol,
+        limit=limit,
+        market_cap_category=market_cap
+    )
+    
+    stocks = [{
+        "rank": i + 1,
+        "ticker": r["symbol"],
+        "company": r["company_name"],
+        "last": r["price"],
+        "change": r["change_percent"],
+        "volume": r["volume"],
+        "avgVolume": r["avg_volume_20d"],
+        "relativeVolume": r["relative_volume"],
+        "sector": r["sector"],
+        "signal": "Unusual Volume"
+    } for i, r in enumerate(results)]
+    
+    return {
+        "count": len(stocks),
+        "stocks": stocks,
+        "updated_at": datetime.now(timezone.utc).isoformat()
     }
 
 

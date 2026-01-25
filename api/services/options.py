@@ -1,7 +1,15 @@
 # api/services/options.py
 
 """
-Options chain data service using yfinance (free)
+Options chain data service using Yahoo Finance (yfinance)
+
+NOTE: Alpaca does NOT provide options data - this is Yahoo Finance only.
+Options data includes:
+- Put/Call ratio
+- Open interest
+- Implied volatility
+- Max pain calculation
+- Unusual activity detection
 """
 
 import yfinance as yf
@@ -63,6 +71,28 @@ class OptionsService:
             nearest_calls = self._df_to_contracts(calls_df, nearest_exp, "call")
             nearest_puts = self._df_to_contracts(puts_df, nearest_exp, "put")
             
+            # Calculate additional volume metrics
+            total_options_volume = total_call_volume + total_put_volume
+            total_oi = total_call_oi + total_put_oi
+            
+            # Volume vs OI ratio (indicates how active vs positions held)
+            vol_oi_ratio = total_options_volume / total_oi if total_oi > 0 else None
+            
+            # Volume signal based on vol/OI ratio
+            volume_signal = None
+            if vol_oi_ratio:
+                if vol_oi_ratio > 0.5:
+                    volume_signal = "unusually_high"  # Very active day
+                elif vol_oi_ratio > 0.3:
+                    volume_signal = "high"
+                elif vol_oi_ratio > 0.1:
+                    volume_signal = "normal"
+                else:
+                    volume_signal = "low"
+            
+            # Call vs Put volume ratio
+            call_vs_put = total_call_volume / total_put_volume if total_put_volume > 0 else None
+            
             return OptionsData(
                 symbol=symbol.upper(),
                 expirations=list(expirations),
@@ -75,6 +105,10 @@ class OptionsService:
                 unusual_activity=unusual,
                 nearest_expiry_calls=nearest_calls[:10],  # Top 10 by volume
                 nearest_expiry_puts=nearest_puts[:10],
+                total_options_volume=total_options_volume,
+                volume_vs_oi_ratio=round(vol_oi_ratio, 3) if vol_oi_ratio else None,
+                volume_signal=volume_signal,
+                call_volume_vs_put_volume=round(call_vs_put, 2) if call_vs_put else None,
             )
             
         except Exception as e:
