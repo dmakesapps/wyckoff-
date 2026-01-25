@@ -38,6 +38,7 @@ class ChartService:
     
     # Valid periods
     PERIODS = {
+        "5d": "5d",
         "7d": "7d",
         "1mo": "1mo",
         "3mo": "3mo",
@@ -46,6 +47,20 @@ class ChartService:
         "2y": "2y",
         "5y": "5y",
         "10y": "10y",
+        "max": "max",
+    }
+    
+    # Map periods to extended periods (to get previous close)
+    EXTENDED_PERIODS = {
+        "5d": "1mo",      # Need extra days for 5d
+        "7d": "1mo",      # Need extra days for 7d
+        "1mo": "3mo",     # Need extra month for 1mo
+        "3mo": "6mo",     # etc.
+        "6mo": "1y",
+        "1y": "2y",
+        "2y": "5y",
+        "5y": "10y",
+        "10y": "max",
         "max": "max",
     }
     
@@ -62,11 +77,12 @@ class ChartService:
         Args:
             symbol: Stock ticker (e.g., "AAPL")
             interval: Candle interval (1m, 5m, 15m, 30m, 1h, 1d, 1wk, 1mo)
-            period: How far back (7d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, max)
+            period: How far back (5d, 7d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, max)
             indicators: List of indicators ["sma_20", "sma_50", "sma_200", "rsi", "volume"]
         
         Returns:
             Dict with candlestick, volume, and indicator data formatted for Lightweight Charts
+            Includes periodPreviousClose in meta for accurate period return calculations
         """
         # Validate inputs
         if interval not in self.INTERVALS:
@@ -81,21 +97,76 @@ class ChartService:
         try:
             ticker = yf.Ticker(symbol)
             
-            # Fetch historical data
-            hist = ticker.history(period=period, interval=interval)
+            # Fetch extended historical data to get previous close
+            extended_period = self.EXTENDED_PERIODS.get(period, period)
+            hist = ticker.history(period=extended_period, interval=interval)
             
             if hist.empty:
                 logger.warning(f"No data found for {symbol}")
                 return None
             
+            # Determine how many candles to return based on requested period
+            requested_candles = self._period_to_candles(period, interval, len(hist))
+            
+            # Extract previous close (the close BEFORE the requested period starts)
+            period_previous_close = None
+            if len(hist) > requested_candles:
+                # Get the close of the day before our period starts
+                extra_data = hist.iloc[:len(hist) - requested_candles]
+                if not extra_data.empty:
+                    period_previous_close = round(float(extra_data.iloc[-1]["Close"]), 2)
+            
+            # Trim to requested period (most recent candles)
+            if len(hist) > requested_candles:
+                hist = hist.tail(requested_candles)
+            
             # Convert to Lightweight Charts format
-            result = self._format_chart_data(symbol, hist, indicators, interval)
+            result = self._format_chart_data(
+                symbol, hist, indicators, interval, 
+                period_previous_close=period_previous_close
+            )
             
             return result
             
         except Exception as e:
             logger.error(f"Error fetching chart data for {symbol}: {e}")
             return None
+    
+    def _period_to_candles(self, period: str, interval: str, max_available: int) -> int:
+        """Convert period string to approximate number of candles"""
+        # Approximate trading days per period
+        period_days = {
+            "5d": 5,
+            "7d": 7,
+            "1mo": 22,
+            "3mo": 65,
+            "6mo": 130,
+            "1y": 252,
+            "2y": 504,
+            "5y": 1260,
+            "10y": 2520,
+            "max": max_available,
+        }
+        
+        days = period_days.get(period, 252)
+        
+        # Adjust for interval (intraday has more candles per day)
+        if interval == "1m":
+            return min(days * 390, max_available)  # ~390 minutes per trading day
+        elif interval == "5m":
+            return min(days * 78, max_available)
+        elif interval == "15m":
+            return min(days * 26, max_available)
+        elif interval == "30m":
+            return min(days * 13, max_available)
+        elif interval == "1h":
+            return min(days * 7, max_available)
+        elif interval == "1wk":
+            return min(days // 5, max_available)
+        elif interval == "1mo":
+            return min(days // 22, max_available)
+        else:  # 1d
+            return min(days, max_available)
     
     def get_mini_chart(
         self,
@@ -113,14 +184,24 @@ class ChartService:
             candles: Max number of candles to return (default 50)
         
         Returns:
-            Compact chart data for inline display
+            Compact chart data for inline display with periodPreviousClose
         """
         try:
             ticker = yf.Ticker(symbol)
-            hist = ticker.history(period=period, interval="1d")
+            
+            # Fetch extra data to get previous close
+            extended_period = self.EXTENDED_PERIODS.get(period, "6mo")
+            hist = ticker.history(period=extended_period, interval="1d")
             
             if hist.empty:
                 return None
+            
+            # Get previous close before limiting to requested candles
+            period_previous_close = None
+            if len(hist) > candles:
+                extra_data = hist.iloc[:len(hist) - candles]
+                if not extra_data.empty:
+                    period_previous_close = round(float(extra_data.iloc[-1]["Close"]), 2)
             
             # Limit to requested candles (most recent)
             if len(hist) > candles:
@@ -132,7 +213,8 @@ class ChartService:
                 hist, 
                 indicators=["sma_20", "volume"],
                 interval="1d",
-                is_mini=True
+                is_mini=True,
+                period_previous_close=period_previous_close
             )
             
             return result
@@ -147,7 +229,8 @@ class ChartService:
         hist,
         indicators: List[str],
         interval: str,
-        is_mini: bool = False
+        is_mini: bool = False,
+        period_previous_close: Optional[float] = None
     ) -> Dict[str, Any]:
         """
         Format pandas DataFrame to Lightweight Charts format.
@@ -156,6 +239,10 @@ class ChartService:
         - time: Unix timestamp (seconds) or 'YYYY-MM-DD' string
         - For candlestick: open, high, low, close
         - For line/histogram: value
+        
+        Args:
+            period_previous_close: The closing price of the day BEFORE the period started.
+                                   Used for accurate period return calculations.
         """
         
         # Convert index to timestamps
@@ -227,11 +314,24 @@ class ChartService:
         
         # Add metadata
         if candlestick:
+            last_price = candlestick[-1]["close"]
+            first_open = candlestick[0]["open"]
+            
+            # Calculate period change using proper previous close
+            if period_previous_close is not None:
+                period_change = round(((last_price - period_previous_close) / period_previous_close) * 100, 2)
+            else:
+                # Fallback: use first candle's open (less accurate)
+                period_change = round(((last_price - first_open) / first_open) * 100, 2)
+            
             result["meta"] = {
                 "firstDate": candlestick[0]["time"],
                 "lastDate": candlestick[-1]["time"],
-                "lastPrice": candlestick[-1]["close"],
+                "firstOpen": first_open,
+                "lastPrice": last_price,
                 "lastVolume": volume_data[-1]["value"] if volume_data else None,
+                "periodPreviousClose": period_previous_close,  # Key field for accurate returns
+                "periodChange": period_change,  # Pre-calculated for convenience
             }
         
         return result
