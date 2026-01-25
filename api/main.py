@@ -22,6 +22,7 @@ from api.services.news import NewsService
 from api.services.kimi import KimiService
 from api.services.alpha import AlphaService
 from api.services.chat import ChatService
+from api.services.chart import ChartService
 
 # Scanner imports
 from api.scanner.database import ScannerDB
@@ -54,6 +55,7 @@ options_service = OptionsService()
 news_service = NewsService()
 kimi_service = KimiService()
 alpha_service = AlphaService()
+chart_service = ChartService()
 
 # Initialize scanner database
 scanner_db = ScannerDB()
@@ -1002,6 +1004,104 @@ async def get_sector_stocks(
     """Get stocks in a specific sector"""
     results = scanner_db.get_by_sector(sector=sector, sort_by=sort_by, limit=limit)
     return {"sector": sector, "count": len(results), "stocks": results}
+
+
+# ═══════════════════════════════════════════════════════════════
+# CHART ENDPOINTS (Lightweight Charts Integration)
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/chart/config")
+async def get_chart_config():
+    """
+    📋 Get chart configuration (available indicators, intervals, periods)
+    
+    Returns metadata about each indicator including:
+    - ID for API requests
+    - Display name
+    - Type (overlay on price or separate pane)
+    - Default color
+    """
+    return {
+        "indicators": chart_service.get_available_indicators(),
+        "intervals": list(chart_service.INTERVALS.keys()),
+        "periods": list(chart_service.PERIODS.keys()),
+    }
+
+
+@app.get("/api/chart/{symbol}/mini")
+async def get_mini_chart(
+    symbol: str,
+    period: str = Query("3mo", description="Time period: 1mo, 3mo, 6mo"),
+    candles: int = Query(50, ge=20, le=100, description="Number of candles")
+):
+    """
+    📊 Get mini chart data for Kimi chat responses
+    
+    Lightweight chart data optimized for inline display in chat.
+    Includes only essential data: candlesticks, SMA 20, and volume.
+    
+    **Use case:** When Kimi includes a chart reference in its response,
+    the frontend fetches this endpoint to render an inline chart.
+    
+    **Example:**
+    ```
+    GET /api/chart/TSLA/mini?period=3mo&candles=50
+    ```
+    """
+    data = chart_service.get_mini_chart(
+        symbol=symbol.upper(),
+        period=period,
+        candles=candles
+    )
+    
+    if not data:
+        raise HTTPException(status_code=404, detail=f"No chart data found for {symbol}")
+    
+    return data
+
+
+@app.get("/api/chart/{symbol}")
+async def get_chart_data(
+    symbol: str,
+    interval: str = Query("1d", description="Candle interval: 1m, 5m, 15m, 30m, 1h, 1d, 1wk, 1mo"),
+    period: str = Query("1y", description="Time period: 7d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, max"),
+    indicators: str = Query("sma_20,sma_50,sma_200,rsi,volume", description="Comma-separated indicators")
+):
+    """
+    📈 Get chart data for Lightweight Charts
+    
+    Returns OHLCV candlestick data with optional indicators.
+    Data is formatted for direct use with Lightweight Charts library.
+    
+    **Intervals:**
+    - 1m, 5m, 15m, 30m: Intraday (limited history)
+    - 1h: Hourly (up to 730 days)
+    - 1d: Daily (years of data) ⭐ Recommended
+    - 1wk, 1mo: Weekly/Monthly
+    
+    **Indicators:**
+    - sma_20, sma_50, sma_200: Simple Moving Averages
+    - rsi: Relative Strength Index (14-period)
+    - volume: Volume bars with color coding
+    
+    **Example:**
+    ```
+    GET /api/chart/AAPL?interval=1d&period=1y&indicators=sma_20,sma_50,volume
+    ```
+    """
+    indicator_list = [i.strip() for i in indicators.split(",") if i.strip()]
+    
+    data = chart_service.get_chart_data(
+        symbol=symbol.upper(),
+        interval=interval,
+        period=period,
+        indicators=indicator_list
+    )
+    
+    if not data:
+        raise HTTPException(status_code=404, detail=f"No chart data found for {symbol}")
+    
+    return data
 
 
 # ═══════════════════════════════════════════════════════════════
