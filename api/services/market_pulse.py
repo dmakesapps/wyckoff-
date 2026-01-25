@@ -520,6 +520,6 @@ Output ONLY valid JSON array, no markdown, no explanation:
         }
 
 
-# Singleton instance
-market_pulse_service = MarketPulseService(cache_minutes=15)
+# Singleton instance - cache for 1 hour to minimize API costs
+market_pulse_service = MarketPulseService(cache_minutes=60)
 
