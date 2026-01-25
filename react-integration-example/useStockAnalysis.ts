@@ -40,3 +40,4 @@ export function useStockAnalysis(): UseStockAnalysisResult {
   return { data, loading, error, analyze, clear };
 }
 
+

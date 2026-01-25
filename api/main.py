@@ -1005,6 +1005,77 @@ async def get_sector_stocks(
 
 
 # ═══════════════════════════════════════════════════════════════
+# MARKET INDICATORS (7 CATEGORIES)
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/market/indicators")
+async def get_market_indicators():
+    """
+    📊 Complete market indicators - 7 categories updated every scan
+    
+    Returns:
+    1. Market Breadth - Advancing/declining stocks, A/D ratio
+    2. Volume Analysis - Up/down volume, unusual volume counts
+    3. Momentum - Gainers/losers at various thresholds
+    4. Sector Performance - Rankings by avg change
+    5. Volatility - Big movers count, volatility level
+    6. Fear & Greed Index - Composite score 0-100
+    7. (SMA Analysis - Coming soon with historical cache)
+    """
+    scheduler = get_scheduler()
+    indicators = scheduler.get_indicators()
+    
+    # If no indicators yet, calculate from existing DB data
+    if "error" in indicators:
+        indicators = scanner_db.calculate_and_store_indicators()
+    
+    return indicators
+
+
+@app.get("/api/market/fear-greed")
+async def get_fear_greed():
+    """
+    😱🤑 Fear & Greed Index
+    
+    A composite score from 0 (Extreme Fear) to 100 (Extreme Greed)
+    
+    Components:
+    - Market Breadth (25%) - Advancing vs declining stocks
+    - Volume (25%) - Up volume vs down volume
+    - Momentum (25%) - Big gainers vs big losers
+    - Market Strength (25%) - New highs vs new lows
+    """
+    scheduler = get_scheduler()
+    indicators = scheduler.get_indicators()
+    fg = indicators.get("fear_greed", {})
+    
+    return {
+        "score": fg.get("score", 50),
+        "label": fg.get("label", "Neutral"),
+        "components": fg.get("components", {}),
+        "interpretation": fg.get("interpretation", ""),
+        "timestamp": indicators.get("timestamp"),
+    }
+
+
+@app.get("/api/market/indicators/history")
+async def get_indicator_history(
+    limit: int = Query(48, ge=1, le=500, description="Number of historical records")
+):
+    """
+    📈 Historical market indicators for charting
+    
+    Returns the last N indicator snapshots (one per scan)
+    Default: 48 records (about 24 hours if scanning every 30 min)
+    """
+    scheduler = get_scheduler()
+    return {
+        "history": scheduler.get_indicator_history(limit),
+        "count": limit,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════
 # FINVIZ-STYLE ENDPOINTS
 # ═══════════════════════════════════════════════════════════════
 

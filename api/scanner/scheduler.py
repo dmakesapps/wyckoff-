@@ -119,6 +119,13 @@ class ScannerScheduler:
                        f"{result['unusual_volume']} unusual volume, "
                        f"{result['near_52w_high']} near highs")
             
+            # Calculate and store market indicators
+            logger.info("📊 Calculating market indicators...")
+            indicators = self.db.calculate_and_store_indicators()
+            fg = indicators.get("fear_greed", {})
+            logger.info(f"   Fear & Greed: {fg.get('score', 'N/A')} ({fg.get('label', 'N/A')})")
+            logger.info(f"   Breadth: {indicators.get('market_breadth', {}).get('ad_ratio', 'N/A')} A/D ratio")
+            
         except Exception as e:
             logger.error(f"Scan failed: {e}")
         finally:
@@ -147,6 +154,14 @@ class ScannerScheduler:
             "interval_minutes": self.interval_minutes,
             "db_stats": self.db.get_summary_stats()
         }
+    
+    def get_indicators(self) -> dict:
+        """Get latest market indicators"""
+        return self.db.get_latest_indicators()
+    
+    def get_indicator_history(self, limit: int = 48) -> list[dict]:
+        """Get historical indicator data"""
+        return self.db.get_indicator_history(limit)
 
 
 # Global scheduler instance

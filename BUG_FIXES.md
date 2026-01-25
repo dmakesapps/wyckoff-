@@ -206,3 +206,4 @@ curl -N -X POST "http://localhost:8000/api/chat" \
 
 **Ready for frontend integration!**
 
+

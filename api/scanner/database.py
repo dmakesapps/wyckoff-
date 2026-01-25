@@ -74,6 +74,49 @@ class ScannerDB:
             )
         """)
         
+        # Market indicators table - stores computed indicators after each scan
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS market_indicators (
+                id INTEGER PRIMARY KEY,
+                timestamp TEXT,
+                
+                -- Market Breadth
+                advancing INTEGER,
+                declining INTEGER,
+                unchanged INTEGER,
+                ad_ratio REAL,
+                ad_line INTEGER,
+                new_highs INTEGER,
+                new_lows INTEGER,
+                
+                -- Volume Analysis
+                up_volume INTEGER,
+                down_volume INTEGER,
+                volume_ratio REAL,
+                total_volume INTEGER,
+                unusual_volume_count INTEGER,
+                
+                -- Momentum
+                gainers_1pct INTEGER,
+                gainers_3pct INTEGER,
+                gainers_5pct INTEGER,
+                losers_1pct INTEGER,
+                losers_3pct INTEGER,
+                losers_5pct INTEGER,
+                
+                -- Fear & Greed (0-100)
+                fear_greed_score INTEGER,
+                fear_greed_label TEXT,
+                fg_breadth_component REAL,
+                fg_volume_component REAL,
+                fg_momentum_component REAL,
+                fg_strength_component REAL,
+                
+                -- Sector data stored as JSON
+                sector_data TEXT
+            )
+        """)
+        
         # Create indexes for fast queries
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_relative_volume ON stocks(relative_volume DESC)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_change_percent ON stocks(change_percent DESC)")
@@ -81,6 +124,7 @@ class ScannerDB:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_unusual_volume ON stocks(is_unusual_volume)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_near_high ON stocks(is_near_high)")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_sector ON stocks(sector)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_indicators_time ON market_indicators(timestamp DESC)")
         
         conn.commit()
     
@@ -599,4 +643,284 @@ class ScannerDB:
             "sma_analysis": self.get_above_below_sma(),
             "stats": self.get_summary_stats(),
         }
+    
+    # ═══════════════════════════════════════════════════════════════
+    # 7-CATEGORY MARKET INDICATORS
+    # ═══════════════════════════════════════════════════════════════
+    
+    def calculate_and_store_indicators(self) -> dict:
+        """
+        Calculate all 7 indicator categories and store them.
+        Called after each scan completes.
+        """
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        # 1. MARKET BREADTH
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE change_percent > 0 AND volume > 10000")
+        advancing = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE change_percent < 0 AND volume > 10000")
+        declining = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE change_percent = 0 AND volume > 10000")
+        unchanged = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE distance_from_52w_high >= -2 AND volume > 10000")
+        new_highs = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE distance_from_52w_low <= 2 AND volume > 10000")
+        new_lows = cursor.fetchone()[0]
+        
+        ad_ratio = round(advancing / declining, 3) if declining > 0 else 10.0
+        ad_line = advancing - declining
+        
+        # 2. VOLUME ANALYSIS
+        cursor.execute("""
+            SELECT COALESCE(SUM(volume), 0) FROM stocks 
+            WHERE change_percent > 0 AND volume > 10000
+        """)
+        up_volume = cursor.fetchone()[0] or 0
+        
+        cursor.execute("""
+            SELECT COALESCE(SUM(volume), 0) FROM stocks 
+            WHERE change_percent < 0 AND volume > 10000
+        """)
+        down_volume = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT COALESCE(SUM(volume), 0) FROM stocks WHERE volume > 10000")
+        total_volume = cursor.fetchone()[0] or 0
+        
+        volume_ratio = round(up_volume / down_volume, 3) if down_volume > 0 else 10.0
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE relative_volume >= 2.0 AND volume > 50000")
+        unusual_volume_count = cursor.fetchone()[0]
+        
+        # 3. MOMENTUM
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE change_percent >= 1 AND volume > 10000")
+        gainers_1pct = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE change_percent >= 3 AND volume > 10000")
+        gainers_3pct = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE change_percent >= 5 AND volume > 10000")
+        gainers_5pct = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE change_percent <= -1 AND volume > 10000")
+        losers_1pct = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE change_percent <= -3 AND volume > 10000")
+        losers_3pct = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM stocks WHERE change_percent <= -5 AND volume > 10000")
+        losers_5pct = cursor.fetchone()[0]
+        
+        # 4. SECTOR PERFORMANCE
+        sector_data = self.get_sector_performance()
+        
+        # 5. FEAR & GREED INDEX (0-100)
+        total_stocks = advancing + declining + unchanged
+        
+        # Component 1: Breadth (25%) - More advancing = more greed
+        if total_stocks > 0:
+            fg_breadth = (advancing / total_stocks) * 100
+        else:
+            fg_breadth = 50
+        
+        # Component 2: Volume (25%) - More up volume = more greed
+        if total_volume > 0:
+            fg_volume = (up_volume / total_volume) * 100
+        else:
+            fg_volume = 50
+        
+        # Component 3: Momentum (25%) - More big gainers vs losers = more greed
+        total_movers = gainers_3pct + losers_3pct
+        if total_movers > 0:
+            fg_momentum = (gainers_3pct / total_movers) * 100
+        else:
+            fg_momentum = 50
+        
+        # Component 4: Market Strength (25%) - New highs vs new lows
+        total_extremes = new_highs + new_lows
+        if total_extremes > 0:
+            fg_strength = (new_highs / total_extremes) * 100
+        else:
+            fg_strength = 50
+        
+        # Weighted Fear & Greed Score
+        fear_greed_score = round(
+            fg_breadth * 0.25 +
+            fg_volume * 0.25 +
+            fg_momentum * 0.25 +
+            fg_strength * 0.25
+        )
+        
+        # Clamp to 0-100
+        fear_greed_score = max(0, min(100, fear_greed_score))
+        
+        # Label
+        if fear_greed_score <= 20:
+            fear_greed_label = "Extreme Fear"
+        elif fear_greed_score <= 40:
+            fear_greed_label = "Fear"
+        elif fear_greed_score <= 60:
+            fear_greed_label = "Neutral"
+        elif fear_greed_score <= 80:
+            fear_greed_label = "Greed"
+        else:
+            fear_greed_label = "Extreme Greed"
+        
+        # Store indicators
+        timestamp = datetime.now(timezone.utc).isoformat()
+        
+        cursor.execute("""
+            INSERT INTO market_indicators (
+                timestamp, advancing, declining, unchanged, ad_ratio, ad_line,
+                new_highs, new_lows, up_volume, down_volume, volume_ratio,
+                total_volume, unusual_volume_count,
+                gainers_1pct, gainers_3pct, gainers_5pct,
+                losers_1pct, losers_3pct, losers_5pct,
+                fear_greed_score, fear_greed_label,
+                fg_breadth_component, fg_volume_component,
+                fg_momentum_component, fg_strength_component,
+                sector_data
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            timestamp, advancing, declining, unchanged, ad_ratio, ad_line,
+            new_highs, new_lows, up_volume, down_volume, volume_ratio,
+            total_volume, unusual_volume_count,
+            gainers_1pct, gainers_3pct, gainers_5pct,
+            losers_1pct, losers_3pct, losers_5pct,
+            fear_greed_score, fear_greed_label,
+            round(fg_breadth, 1), round(fg_volume, 1),
+            round(fg_momentum, 1), round(fg_strength, 1),
+            json.dumps(sector_data)
+        ))
+        
+        conn.commit()
+        
+        return self.get_latest_indicators()
+    
+    def get_latest_indicators(self) -> dict:
+        """Get the most recent market indicators"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT * FROM market_indicators 
+            ORDER BY id DESC LIMIT 1
+        """)
+        
+        row = cursor.fetchone()
+        if not row:
+            return {"error": "No indicators calculated yet"}
+        
+        r = dict(row)
+        
+        # Parse sector data from JSON
+        try:
+            sector_data = json.loads(r.get("sector_data", "[]"))
+        except:
+            sector_data = []
+        
+        total = r["advancing"] + r["declining"] + r["unchanged"]
+        
+        return {
+            "timestamp": r["timestamp"],
+            
+            "market_breadth": {
+                "advancing": r["advancing"],
+                "declining": r["declining"],
+                "unchanged": r["unchanged"],
+                "total": total,
+                "ad_ratio": r["ad_ratio"],
+                "ad_line": r["ad_line"],
+                "advance_percent": round((r["advancing"] / total) * 100, 1) if total > 0 else 0,
+                "decline_percent": round((r["declining"] / total) * 100, 1) if total > 0 else 0,
+                "new_highs": r["new_highs"],
+                "new_lows": r["new_lows"],
+            },
+            
+            "volume_analysis": {
+                "up_volume": r["up_volume"],
+                "down_volume": r["down_volume"],
+                "volume_ratio": r["volume_ratio"],
+                "total_volume": r["total_volume"],
+                "unusual_volume_count": r["unusual_volume_count"],
+                "up_volume_percent": round((r["up_volume"] / r["total_volume"]) * 100, 1) if r["total_volume"] > 0 else 0,
+            },
+            
+            "momentum": {
+                "gainers_1pct": r["gainers_1pct"],
+                "gainers_3pct": r["gainers_3pct"],
+                "gainers_5pct": r["gainers_5pct"],
+                "losers_1pct": r["losers_1pct"],
+                "losers_3pct": r["losers_3pct"],
+                "losers_5pct": r["losers_5pct"],
+                "net_gainers_1pct": r["gainers_1pct"] - r["losers_1pct"],
+                "net_gainers_3pct": r["gainers_3pct"] - r["losers_3pct"],
+            },
+            
+            "sector_performance": sector_data[:10],  # Top 10 sectors
+            
+            "fear_greed": {
+                "score": r["fear_greed_score"],
+                "label": r["fear_greed_label"],
+                "components": {
+                    "breadth": r["fg_breadth_component"],
+                    "volume": r["fg_volume_component"],
+                    "momentum": r["fg_momentum_component"],
+                    "strength": r["fg_strength_component"],
+                },
+                "interpretation": self._interpret_fear_greed(r["fear_greed_score"]),
+            },
+            
+            "volatility": {
+                "big_movers_up": r["gainers_5pct"],
+                "big_movers_down": r["losers_5pct"],
+                "total_big_movers": r["gainers_5pct"] + r["losers_5pct"],
+                "volatility_level": self._get_volatility_level(r["gainers_5pct"] + r["losers_5pct"], total),
+            },
+        }
+    
+    def _interpret_fear_greed(self, score: int) -> str:
+        """Get interpretation text for fear/greed score"""
+        if score <= 20:
+            return "Extreme fear indicates potential buying opportunity - market may be oversold"
+        elif score <= 40:
+            return "Fear in the market - cautious sentiment, potential value opportunities"
+        elif score <= 60:
+            return "Neutral sentiment - market is balanced between buyers and sellers"
+        elif score <= 80:
+            return "Greed in the market - bullish sentiment, be cautious of overextension"
+        else:
+            return "Extreme greed suggests potential pullback - market may be overbought"
+    
+    def _get_volatility_level(self, big_movers: int, total: int) -> str:
+        """Determine market volatility level"""
+        if total == 0:
+            return "unknown"
+        pct = (big_movers / total) * 100
+        if pct >= 15:
+            return "extreme"
+        elif pct >= 10:
+            return "high"
+        elif pct >= 5:
+            return "moderate"
+        else:
+            return "low"
+    
+    def get_indicator_history(self, limit: int = 48) -> list[dict]:
+        """Get historical indicators (for charting fear/greed over time)"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT timestamp, fear_greed_score, fear_greed_label,
+                   advancing, declining, ad_ratio, volume_ratio
+            FROM market_indicators 
+            ORDER BY id DESC LIMIT ?
+        """, (limit,))
+        
+        return [dict(row) for row in cursor.fetchall()]
 
