@@ -23,6 +23,7 @@ from api.services.kimi import KimiService
 from api.services.alpha import AlphaService
 from api.services.chat import ChatService
 from api.services.chart import ChartService
+from api.services.market_pulse import market_pulse_service
 
 # Scanner imports
 from api.scanner.database import ScannerDB
@@ -1564,6 +1565,70 @@ async def get_unusual_volume(
         "stocks": stocks,
         "updated_at": datetime.now(timezone.utc).isoformat()
     }
+
+
+# ═══════════════════════════════════════════════════════════════
+# MARKET PULSE (AI-Generated Headlines)
+# ═══════════════════════════════════════════════════════════════
+
+@app.get("/api/market/pulse")
+async def get_market_pulse(
+    force_refresh: bool = Query(False, description="Force regenerate even if cached")
+):
+    """
+    🎯 AI-Generated Market Pulse - "What's happening today"
+    
+    Returns bite-sized, Kimi-generated financial updates across 6 categories:
+    - **Markets** - Major indices (S&P, NASDAQ, Dow)
+    - **Crypto** - Bitcoin, Ethereum
+    - **Economy** - Fed, rates, treasury yields
+    - **Earnings** - Notable earnings reports
+    - **Tech** - Big tech moves
+    - **Commodities** - Gold, Oil
+    
+    Headlines are AI-generated using real-time market data and cached for 15 minutes.
+    
+    **Example Response:**
+    ```json
+    {
+      "updates": [
+        {"category": "Markets", "headline": "S&P 500 rallies 1.2% on tech strength", "sentiment": "positive"},
+        {"category": "Crypto", "headline": "Bitcoin holds above $105K amid ETF inflows", "sentiment": "positive"}
+      ]
+    }
+    ```
+    """
+    pulse = market_pulse_service.get_pulse(force_refresh=force_refresh)
+    
+    # Remove raw_data from response (keep it internal)
+    response = {
+        "generated_at": pulse["generated_at"],
+        "updates": pulse["updates"],
+        "cache_expires_at": pulse["cache_expires_at"],
+    }
+    
+    return response
+
+
+@app.get("/api/market/pulse/status")
+async def get_pulse_cache_status():
+    """
+    Get cache status for market pulse
+    
+    Useful for frontend to know when to expect fresh data
+    """
+    return market_pulse_service.get_cache_status()
+
+
+@app.get("/api/market/pulse/raw")
+async def get_market_pulse_raw():
+    """
+    Get market pulse with raw underlying data
+    
+    Includes the raw market data used to generate headlines.
+    Useful for debugging or advanced displays.
+    """
+    return market_pulse_service.get_pulse()
 
 
 # ═══════════════════════════════════════════════════════════════

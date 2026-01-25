@@ -1,20 +1,20 @@
 # api/models/stock.py
 
 """
-Pydantic models for API requests and responses
+Pydantic models for stock data
 """
 
-from pydantic import BaseModel, Field
-from typing import Optional, Literal
+from pydantic import BaseModel
+from typing import Optional, List
 from datetime import datetime
 
 
 # ═══════════════════════════════════════════════════════════════
-# STOCK DATA MODELS
+# QUOTE & PRICE MODELS
 # ═══════════════════════════════════════════════════════════════
 
 class StockQuote(BaseModel):
-    """Current stock price data"""
+    """Real-time stock quote"""
     symbol: str
     price: float
     open: float
@@ -28,8 +28,28 @@ class StockQuote(BaseModel):
     timestamp: datetime
 
 
+class Fundamentals(BaseModel):
+    """Company fundamentals"""
+    market_cap: Optional[float] = None
+    market_cap_formatted: Optional[str] = None
+    pe_ratio: Optional[float] = None
+    eps: Optional[float] = None
+    dividend_yield: Optional[float] = None
+    beta: Optional[float] = None
+    week_52_high: Optional[float] = None
+    week_52_low: Optional[float] = None
+    avg_volume: Optional[int] = None
+    shares_outstanding: Optional[int] = None
+    sector: Optional[str] = None
+    industry: Optional[str] = None
+
+
+# ═══════════════════════════════════════════════════════════════
+# TECHNICAL INDICATOR MODELS
+# ═══════════════════════════════════════════════════════════════
+
 class MovingAverages(BaseModel):
-    """Moving average values"""
+    """Moving average indicators"""
     sma_20: Optional[float] = None
     sma_50: Optional[float] = None
     sma_200: Optional[float] = None
@@ -37,66 +57,63 @@ class MovingAverages(BaseModel):
     price_vs_sma_20: Optional[str] = None  # "above" or "below"
     price_vs_sma_50: Optional[str] = None
     price_vs_sma_200: Optional[str] = None
-    golden_cross: Optional[bool] = None  # 50 SMA > 200 SMA
-    death_cross: Optional[bool] = None   # 50 SMA < 200 SMA
+    golden_cross: Optional[bool] = None  # SMA 50 > SMA 200
+    death_cross: Optional[bool] = None   # SMA 50 < SMA 200
 
 
 class MomentumIndicators(BaseModel):
-    """Momentum indicator values"""
+    """Momentum indicators"""
     rsi: Optional[float] = None
     rsi_signal: Optional[str] = None  # "overbought", "oversold", "neutral"
     macd: Optional[float] = None
     macd_signal: Optional[float] = None
     macd_histogram: Optional[float] = None
     macd_trend: Optional[str] = None  # "bullish", "bearish", "neutral"
-    stochastic_k: Optional[float] = None
-    stochastic_d: Optional[float] = None
-    stochastic_signal: Optional[str] = None
+    stoch_k: Optional[float] = None
+    stoch_d: Optional[float] = None
+    stoch_signal: Optional[str] = None
 
 
 class VolatilityIndicators(BaseModel):
-    """Volatility indicator values"""
-    bb_upper: Optional[float] = None
-    bb_middle: Optional[float] = None
-    bb_lower: Optional[float] = None
-    bb_position: Optional[str] = None  # "above_upper", "below_lower", "within"
+    """Volatility indicators"""
     atr: Optional[float] = None
-    atr_percent: Optional[float] = None  # ATR as % of price
+    atr_percent: Optional[float] = None
+    bollinger_upper: Optional[float] = None
+    bollinger_middle: Optional[float] = None
+    bollinger_lower: Optional[float] = None
+    bollinger_width: Optional[float] = None
+    price_position: Optional[str] = None  # "above_upper", "below_lower", "within"
 
 
 class VolumeAnalysis(BaseModel):
     """Volume analysis"""
-    current_volume: int
-    avg_volume_20d: Optional[float] = None
-    volume_ratio: Optional[float] = None  # current / average
-    is_unusual: bool = False
+    current_volume: Optional[int] = None
+    avg_volume_20d: Optional[int] = None
+    relative_volume: Optional[float] = None
+    is_unusual: Optional[bool] = None
     volume_trend: Optional[str] = None  # "increasing", "decreasing", "stable"
-    
-    # Advanced volume indicators
-    vwap: Optional[float] = None  # Volume-Weighted Average Price
-    price_vs_vwap: Optional[str] = None  # "above", "below"
-    obv: Optional[float] = None  # On-Balance Volume
-    obv_trend: Optional[str] = None  # "accumulating", "distributing", "neutral"
-    mfi: Optional[float] = None  # Money Flow Index (0-100)
-    mfi_signal: Optional[str] = None  # "overbought", "oversold", "neutral"
-    volume_roc: Optional[float] = None  # Volume Rate of Change (%)
-    volume_roc_signal: Optional[str] = None  # "accelerating", "decelerating", "stable"
-    cmf: Optional[float] = None  # Chaikin Money Flow (-1 to 1)
-    cmf_signal: Optional[str] = None  # "accumulation", "distribution", "neutral"
+    # Advanced volume metrics
+    vwap: Optional[float] = None
+    obv: Optional[float] = None
+    obv_trend: Optional[str] = None
+    mfi: Optional[float] = None
+    mfi_signal: Optional[str] = None
+    volume_roc: Optional[float] = None
+    cmf: Optional[float] = None
+    cmf_signal: Optional[str] = None
 
 
 class PriceLevels(BaseModel):
     """Key price levels"""
+    support_1: Optional[float] = None
+    support_2: Optional[float] = None
+    resistance_1: Optional[float] = None
+    resistance_2: Optional[float] = None
+    pivot_point: Optional[float] = None
     ath: Optional[float] = None
-    ath_date: Optional[str] = None
     atl: Optional[float] = None
-    atl_date: Optional[str] = None
-    week_52_high: Optional[float] = None
-    week_52_low: Optional[float] = None
     distance_from_ath: Optional[float] = None  # percentage
-    distance_from_atl: Optional[float] = None
-    distance_from_52w_high: Optional[float] = None
-    distance_from_52w_low: Optional[float] = None
+    distance_from_atl: Optional[float] = None  # percentage
 
 
 class TechnicalIndicators(BaseModel):
@@ -110,110 +127,84 @@ class TechnicalIndicators(BaseModel):
 
 
 # ═══════════════════════════════════════════════════════════════
-# OPTIONS DATA MODELS
+# OPTIONS MODELS
 # ═══════════════════════════════════════════════════════════════
 
 class OptionContract(BaseModel):
     """Single option contract"""
     strike: float
     expiration: str
-    contract_type: Literal["call", "put"]
-    bid: float
-    ask: float
-    last_price: float
-    volume: int
-    open_interest: int
+    type: str  # "call" or "put"
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    last_price: Optional[float] = None
+    volume: Optional[int] = None
+    open_interest: Optional[int] = None
     implied_volatility: Optional[float] = None
 
 
 class OptionsData(BaseModel):
     """Options chain summary"""
     symbol: str
-    expirations: list[str]
+    expirations: List[str]
     put_call_ratio: Optional[float] = None
     total_call_volume: int = 0
     total_put_volume: int = 0
     total_call_oi: int = 0
     total_put_oi: int = 0
-    iv_percentile: Optional[float] = None
     max_pain: Optional[float] = None
-    unusual_activity: list[dict] = []
-    nearest_expiry_calls: list[OptionContract] = []
-    nearest_expiry_puts: list[OptionContract] = []
-    
-    # Volume analysis
-    total_options_volume: int = 0
-    volume_vs_oi_ratio: Optional[float] = None  # Total volume / total OI
+    nearest_calls: List[OptionContract] = []
+    nearest_puts: List[OptionContract] = []
+    unusual_activity: List[dict] = []
+    # Additional volume metrics
+    total_options_volume: Optional[int] = None
+    volume_vs_oi_ratio: Optional[float] = None
     volume_signal: Optional[str] = None  # "unusually_high", "high", "normal", "low"
-    call_volume_vs_put_volume: Optional[float] = None  # Ratio
-    oi_change_signal: Optional[str] = None  # "building", "unwinding", "stable"
+    call_volume_vs_put_volume: Optional[float] = None
 
 
 # ═══════════════════════════════════════════════════════════════
-# NEWS DATA MODELS
+# NEWS MODELS
 # ═══════════════════════════════════════════════════════════════
 
 class NewsItem(BaseModel):
-    """Single news article"""
+    """Single news article with source"""
     title: str
-    summary: Optional[str] = None
     source: str
-    url: str
+    url: Optional[str] = None
     published_at: datetime
     sentiment: Optional[str] = None  # "positive", "negative", "neutral"
+    summary: Optional[str] = None
 
 
 class NewsSummary(BaseModel):
-    """News summary for a stock"""
+    """News summary with sentiment analysis"""
     symbol: str
-    articles: list[NewsItem]
-    overall_sentiment: Optional[str] = None
-    key_catalysts: list[str] = []
+    articles: List[NewsItem]
+    overall_sentiment: str  # "positive", "negative", "neutral"
+    key_catalysts: List[str] = []
     earnings_date: Optional[str] = None
 
 
 # ═══════════════════════════════════════════════════════════════
-# FUNDAMENTALS
-# ═══════════════════════════════════════════════════════════════
-
-class Fundamentals(BaseModel):
-    """Basic fundamental data"""
-    market_cap: Optional[float] = None
-    market_cap_formatted: Optional[str] = None
-    pe_ratio: Optional[float] = None
-    forward_pe: Optional[float] = None
-    eps: Optional[float] = None
-    dividend_yield: Optional[float] = None
-    sector: Optional[str] = None
-    industry: Optional[str] = None
-    shares_outstanding: Optional[int] = None
-    float_shares: Optional[int] = None
-    short_percent: Optional[float] = None
-
-
-# ═══════════════════════════════════════════════════════════════
-# AI ANALYSIS
+# ANALYSIS MODELS
 # ═══════════════════════════════════════════════════════════════
 
 class AIAnalysis(BaseModel):
     """AI-generated analysis"""
     summary: str
-    sentiment: Literal["bullish", "bearish", "neutral"]
-    confidence: float = Field(ge=0, le=100)  # 0-100
-    key_points: list[str]
-    catalysts: list[str]
-    risks: list[str]
-    price_targets: Optional[dict] = None  # {"support": x, "resistance": y}
+    sentiment: str  # "bullish", "bearish", "neutral"
+    confidence: float  # 0.0 to 1.0
+    key_points: List[str] = []
+    catalysts: List[str] = []
+    risks: List[str] = []
+    price_targets: Optional[dict] = None
     recommendation: Optional[str] = None
     generated_at: datetime
 
 
-# ═══════════════════════════════════════════════════════════════
-# COMPLETE ANALYSIS RESPONSE
-# ═══════════════════════════════════════════════════════════════
-
 class StockAnalysis(BaseModel):
-    """Complete stock analysis response"""
+    """Complete stock analysis"""
     symbol: str
     company_name: Optional[str] = None
     quote: StockQuote
@@ -221,16 +212,17 @@ class StockAnalysis(BaseModel):
     options: Optional[OptionsData] = None
     news: Optional[NewsSummary] = None
     fundamentals: Optional[Fundamentals] = None
+    alpha_score: Optional[dict] = None
     ai_analysis: Optional[AIAnalysis] = None
     analyzed_at: datetime
 
 
 # ═══════════════════════════════════════════════════════════════
-# REQUEST MODELS
+# REQUEST/RESPONSE MODELS
 # ═══════════════════════════════════════════════════════════════
 
 class AnalysisRequest(BaseModel):
-    """Request for single stock analysis"""
+    """Request for stock analysis"""
     symbol: str
     include_options: bool = True
     include_news: bool = True
@@ -238,23 +230,23 @@ class AnalysisRequest(BaseModel):
 
 
 class ScanRequest(BaseModel):
-    """Request for market scan"""
-    symbols: Optional[list[str]] = None  # If None, scan all tradeable
-    min_price: float = 1.0
-    max_price: float = 10000.0
+    """Market scan request"""
+    symbols: Optional[List[str]] = None
+    strategies: List[str] = ["breakout", "momentum", "unusual_volume"]
+    min_price: float = 5.0
+    max_price: float = 500.0
     min_volume: int = 100000
-    strategies: list[str] = ["breakout", "momentum", "unusual_volume"]
 
 
 class ScanResult(BaseModel):
-    """Single result from market scan"""
+    """Single scan result"""
     symbol: str
     company_name: Optional[str] = None
     price: float
     change_percent: float
     volume: int
-    signals: list[str]  # Which strategies flagged this
-    score: float  # Overall alpha score
-    sentiment: Literal["bullish", "bearish", "neutral"]
-    brief: str  # One-line summary
+    signals: List[str]
+    score: int
+    sentiment: str
+    brief: str
 
