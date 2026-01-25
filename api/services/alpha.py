@@ -68,13 +68,30 @@ class AlphaService:
         if not volumes or len(volumes) < 10:
             return {}
         
-        # Average volumes
+        # Average volumes (from historical data)
         avg_10d = sum(volumes[-10:]) / 10
         avg_20d = sum(volumes[-20:]) / min(20, len(volumes))
         avg_50d = sum(volumes[-50:]) / min(50, len(volumes))
         
-        # Relative volume (RVOL)
-        rvol = current_volume / avg_20d if avg_20d > 0 else 1.0
+        # Last complete day's volume
+        last_complete_volume = volumes[-1] if volumes else 0
+        
+        # Smart volume selection:
+        # If current_volume is less than 10% of average, we're likely outside market hours
+        # or very early in the day - use last complete day's volume instead
+        is_partial_day = current_volume < (avg_20d * 0.1)
+        
+        if is_partial_day and last_complete_volume > 0:
+            # Use last complete trading day's volume
+            effective_volume = last_complete_volume
+            volume_note = "last_complete_day"
+        else:
+            # Use real-time volume (market is open and accumulating)
+            effective_volume = current_volume
+            volume_note = "intraday" if current_volume < avg_20d * 0.5 else "current"
+        
+        # Relative volume (RVOL) - using effective volume
+        rvol = effective_volume / avg_20d if avg_20d > 0 else 1.0
         
         # Volume trend (compare last 5 days vs previous 5 days)
         if len(volumes) >= 10:
@@ -89,12 +106,12 @@ class AlphaService:
         else:
             volume_trend = "unknown"
         
-        # Volume spike / dry up
+        # Volume spike / dry up - based on effective volume
         volume_spike = rvol >= 2.0
         volume_dry_up = rvol <= 0.5
         
         # Dollar volume
-        dollar_volume = current_price * current_volume
+        dollar_volume = current_price * effective_volume
         
         # Accumulation/Distribution (simplified)
         # Compare volume on up days vs down days
@@ -117,7 +134,10 @@ class AlphaService:
             acc_dist = "unknown"
         
         return {
-            "current_volume": current_volume,
+            "current_volume": effective_volume,
+            "raw_intraday_volume": current_volume,
+            "last_day_volume": last_complete_volume,
+            "volume_note": volume_note,
             "avg_volume_10d": round(avg_10d),
             "avg_volume_20d": round(avg_20d),
             "avg_volume_50d": round(avg_50d),
