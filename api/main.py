@@ -5,10 +5,11 @@ Alpha Discovery API — FastAPI Application
 """
 
 import json
+import threading
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from api.config import API_TITLE, API_VERSION, API_DESCRIPTION, CORS_ORIGINS
@@ -60,6 +61,16 @@ chart_service = ChartService()
 
 # Initialize scanner database
 scanner_db = ScannerDB()
+
+# ═══════════════════════════════════════════════════════════════
+# HEADLINES CACHE (1 hour)
+# ═══════════════════════════════════════════════════════════════
+_headlines_cache = {
+    "data": None,
+    "timestamp": None,
+    "lock": threading.Lock(),
+    "cache_minutes": 60,  # 1 hour cache
+}
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -1395,14 +1406,40 @@ async def get_market_breadth():
 
 @app.get("/api/market/headlines")
 async def get_top_headlines(
-    limit: int = Query(20, ge=1, le=50)
+    limit: int = Query(20, ge=1, le=50),
+    force_refresh: bool = Query(False, description="Force refresh cache")
 ):
     """
     Top market headlines - aggregated from major indices
     
-    Returns the most important/recent market news headlines
+    Returns the most important/recent market news headlines.
+    Cached for 1 hour to reduce API calls.
     """
-    # Fetch from multiple sources
+    with _headlines_cache["lock"]:
+        # Check cache
+        cache_valid = (
+            not force_refresh and
+            _headlines_cache["data"] is not None and
+            _headlines_cache["timestamp"] is not None and
+            (datetime.now(timezone.utc) - _headlines_cache["timestamp"]).total_seconds() < (_headlines_cache["cache_minutes"] * 60)
+        )
+        
+        if cache_valid:
+            # Return cached data with updated "age" times
+            cached = _headlines_cache["data"].copy()
+            # Update age strings for freshness
+            for headline in cached.get("headlines", []):
+                if "published" in headline:
+                    try:
+                        pub_time = datetime.fromisoformat(headline["published"].replace("Z", "+00:00"))
+                        headline["age"] = _get_time_ago(pub_time)
+                    except:
+                        pass
+            cached["from_cache"] = True
+            cached["cache_expires_at"] = (_headlines_cache["timestamp"] + timedelta(minutes=_headlines_cache["cache_minutes"])).isoformat()
+            return cached
+    
+    # Fetch fresh data
     spy_news = news_service.get_news("SPY", limit=limit)
     qqq_news = news_service.get_news("QQQ", limit=limit // 2)
     dia_news = news_service.get_news("DIA", limit=limit // 2)
@@ -1443,7 +1480,8 @@ async def get_top_headlines(
     neg = sentiments.count("negative")
     overall = "bullish" if pos > neg * 1.5 else "bearish" if neg > pos * 1.5 else "neutral"
     
-    return {
+    now = datetime.now(timezone.utc)
+    result = {
         "headlines": headlines,
         "count": len(headlines),
         "marketSentiment": overall,
@@ -1452,8 +1490,18 @@ async def get_top_headlines(
             "negative": neg,
             "neutral": len(sentiments) - pos - neg
         },
-        "updated_at": datetime.now(timezone.utc).isoformat()
+        "updated_at": now.isoformat(),
+        "from_cache": False,
+        "cache_expires_at": (now + timedelta(minutes=_headlines_cache["cache_minutes"])).isoformat()
     }
+    
+    # Cache if we got results
+    if headlines:
+        with _headlines_cache["lock"]:
+            _headlines_cache["data"] = result
+            _headlines_cache["timestamp"] = now
+    
+    return result
 
 
 def _get_time_ago(dt: datetime) -> str:
