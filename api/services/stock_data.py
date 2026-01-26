@@ -205,6 +205,69 @@ class StockDataService:
             return ticker.info.get("longName") or ticker.info.get("shortName")
         except:
             return None
+
+    def get_insider_transactions(self, symbol: str) -> Optional[dict]:
+        """
+        Get recent insider transactions (Yahoo Finance)
+        Returns: Dict with transaction summary
+        """
+        try:
+            ticker = yf.Ticker(symbol)
+            insiders = ticker.insider_transactions
+            
+            if insiders is None or insiders.empty:
+                return {"count": 0, "transactions": [], "message": "No recent insider transactions found."}
+            
+            # Get latest 10 transactions
+            latest = insiders.head(10).copy()
+            # Convert timestamp to string if needed
+            if 'Start Date' in latest.columns:
+                latest['Date'] = latest['Start Date'].astype(str)
+            
+            transactions = latest.to_dict('records')
+            
+            # Calculate summary
+            buys = insiders[insiders['Text'].str.contains('Buy', case=False, na=False)]
+            sales = insiders[insiders['Text'].str.contains('Sale', case=False, na=False)]
+            
+            return {
+                "count": len(insiders),
+                "recent_buys": len(buys),
+                "recent_sales": len(sales),
+                "transactions": transactions,
+                "summary": f"Found {len(insiders)} total transactions in the last 6 months ({len(buys)} buys, {len(sales)} sales)."
+            }
+        except Exception as e:
+            logger.debug(f"Error fetching insider transactions for {symbol}: {e}")
+            return None
+
+    def get_institutional_holders(self, symbol: str) -> Optional[dict]:
+        """
+        Get major institutional holders (Yahoo Finance)
+        """
+        try:
+            ticker = yf.Ticker(symbol)
+            holders = ticker.institutional_holders
+            major = ticker.major_holders
+            
+            if holders is None or holders.empty:
+                return {"holders": [], "message": "Institutional holdings data unavailable."}
+            
+            # Format results
+            data = holders.head(10).to_dict('records')
+            
+            summary = {}
+            if major is not None and not major.empty:
+                summary = major.set_index(1).to_dict()[0]
+            
+            return {
+                "top_holders": data,
+                "major_holders_summary": summary,
+                "total_holders_count": len(holders)
+            }
+        except Exception as e:
+            logger.debug(f"Error fetching institutional holders for {symbol}: {e}")
+            return None
     
     def get_tradeable_symbols(self) -> list[str]:
         """

@@ -185,6 +185,20 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
                 ],
             }
         
+        elif tool_name == "get_insider_transactions":
+            symbol = arguments.get("symbol", "").upper()
+            insiders = stock_service.get_insider_transactions(symbol)
+            holders = stock_service.get_institutional_holders(symbol)
+            
+            return {
+                "symbol": symbol,
+                "insider_summary": insiders.get("summary") if insiders else "No data available",
+                "recent_insider_trades": insiders.get("transactions")[:10] if insiders and insiders.get("transactions") else [],
+                "institutional_ownership": holders.get("major_holders_summary") if holders else {},
+                "top_institutional_holders": holders.get("top_holders")[:10] if holders and holders.get("top_holders") else [],
+                "total_holders": holders.get("total_holders_count") if holders else 0
+            }
+        
         elif tool_name == "get_options_flow":
             symbol = arguments.get("symbol", "").upper()
             options = options_service.get_options_data(symbol)
