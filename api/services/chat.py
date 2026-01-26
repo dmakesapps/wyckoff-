@@ -400,6 +400,39 @@ class ChatService:
         self.model = KIMI_MODEL
         self.tool_executor = tool_executor
     
+    def _format_stocks_table(self, data: dict) -> str:
+        """Fallback method to format stock data into a markdown table"""
+        stocks = data.get("stocks", [])
+        if not stocks:
+            return "No stocks found matching your criteria.\n\nWould you like to try different filters?"
+        
+        # Build markdown table
+        lines = [
+            "| Ticker | Price | Change | Rel Vol | Sector |",
+            "|--------|-------|--------|---------|--------|"
+        ]
+        
+        for stock in stocks[:15]:  # Limit to 15 rows
+            symbol = stock.get("symbol", "N/A")
+            price = stock.get("price", 0)
+            change = stock.get("change_percent", 0)
+            rvol = stock.get("relative_volume", 0)
+            sector = stock.get("sector", "N/A") or "N/A"
+            
+            change_str = f"+{change:.1f}%" if change > 0 else f"{change:.1f}%"
+            rvol_str = f"{rvol:.1f}x" if rvol else "N/A"
+            
+            lines.append(f"| **{symbol}** | ${price:.2f} | {change_str} | {rvol_str} | {sector} |")
+        
+        table = "\n".join(lines)
+        
+        # Add summary
+        count = data.get("count", len(stocks))
+        table += f"\n\nFound {count} stocks matching your criteria."
+        table += "\n\nWould you like more details on any of these tickers?"
+        
+        return table
+    
     # Regex pattern to detect XML-style tool calls in text
     # Matches: <tool_name> {...json...} </tool_name>
     TOOL_TAG_PATTERN = re.compile(
@@ -410,16 +443,80 @@ class ChatService:
         re.DOTALL
     )
     
-    def _extract_xml_tool_calls(self, text: str) -> tuple[str, list[dict]]:
+    # Pattern for Kimi's special token format:
+    # <|tool_calls_section_begin|><|tool_call_begin|>tool {"count": 15, "stocks": [...]}
+    KIMI_TOOL_TOKEN_PATTERN = re.compile(
+        r'<\|tool_calls_section_begin\|>.*?<\|tool_call_begin\|>\s*tool\s*(\{.*)',
+        re.DOTALL
+    )
+    
+    def _extract_xml_tool_calls(self, text: str) -> tuple[str, list[dict], dict]:
         """
-        Extract XML-style tool calls from text and return cleaned text + tool calls
+        Extract tool calls from text (both XML-style and Kimi token format)
         
-        Input: "I'll search... <search_market> {"min_price": 5} </search_market> here are results"
-        Output: ("I'll search... here are results", [{"name": "search_market", "arguments": {"min_price": 5}}])
+        Returns:
+            (cleaned_text, tool_calls_to_execute, embedded_data)
+            
+        embedded_data: If the model already included results (Kimi token format), 
+                       this will contain the parsed data so we can skip execution.
         """
         tool_calls = []
+        embedded_data = None
+        cleaned_text = text
         
-        # Find all matches
+        # Check for Kimi's special token format first:
+        # <|tool_calls_section_begin|><|tool_call_begin|>tool {"count": 15, "filters": {...}, "stocks": [...]}
+        kimi_match = self.KIMI_TOOL_TOKEN_PATTERN.search(text)
+        if kimi_match:
+            json_str = kimi_match.group(1)
+            logger.info(f"[CHAT] Detected Kimi token format tool output ({len(json_str)} chars)")
+            
+            # Try to parse the JSON - it might be incomplete or malformed
+            try:
+                # The JSON might not have a closing brace, try to fix it
+                json_str = json_str.strip()
+                if not json_str.endswith('}'):
+                    # Count braces to find where to close
+                    open_braces = json_str.count('{')
+                    close_braces = json_str.count('}')
+                    json_str += '}' * (open_braces - close_braces)
+                
+                parsed_data = json.loads(json_str)
+                
+                # Check if this contains actual data (stocks, etc) or just parameters
+                if 'stocks' in parsed_data:
+                    # The model already "executed" the tool and included results
+                    logger.info(f"[CHAT] Found embedded results with {len(parsed_data.get('stocks', []))} stocks")
+                    embedded_data = parsed_data
+                else:
+                    # Just parameters - need to execute
+                    tool_calls.append({
+                        "id": "kimi_token_call_0",
+                        "name": "search_market",  # Default to search_market
+                        "arguments": parsed_data.get("filters", parsed_data)
+                    })
+                    
+            except json.JSONDecodeError as e:
+                logger.warning(f"[CHAT] Failed to parse Kimi token JSON: {e}")
+                # Try to extract just the stocks array if present
+                stocks_match = re.search(r'"stocks"\s*:\s*(\[.*\])', json_str, re.DOTALL)
+                if stocks_match:
+                    try:
+                        stocks = json.loads(stocks_match.group(1))
+                        embedded_data = {"stocks": stocks}
+                        logger.info(f"[CHAT] Extracted {len(stocks)} stocks from partial JSON")
+                    except:
+                        pass
+            
+            # Remove the Kimi token format from text
+            # Find where the token section starts
+            token_start = text.find('<|tool_calls_section_begin|>')
+            if token_start != -1:
+                cleaned_text = text[:token_start].strip()
+            
+            return cleaned_text, tool_calls, embedded_data
+        
+        # Fall back to XML-style pattern
         for match in self.TOOL_TAG_PATTERN.finditer(text):
             tool_name = match.group(1)
             json_str = match.group(2)
@@ -437,11 +534,11 @@ class ChatService:
             })
         
         # Remove the tool tags from text
-        cleaned_text = self.TOOL_TAG_PATTERN.sub('', text)
+        cleaned_text = self.TOOL_TAG_PATTERN.sub('', cleaned_text)
         # Clean up extra whitespace
         cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
         
-        return cleaned_text, tool_calls
+        return cleaned_text, tool_calls, embedded_data
     
     def chat_stream(
         self,
@@ -506,11 +603,63 @@ class ChatService:
             
             # Check for XML-style tool calls in accumulated text
             if text_buffer:
-                logger.info(f"[CHAT] Checking text buffer ({len(text_buffer)} chars) for XML tool calls...")
+                logger.info(f"[CHAT] Checking text buffer ({len(text_buffer)} chars) for tool calls...")
                 
-                cleaned_text, extracted_xml_tools = self._extract_xml_tool_calls(text_buffer)
+                cleaned_text, extracted_xml_tools, embedded_data = self._extract_xml_tool_calls(text_buffer)
                 xml_tool_calls = extracted_xml_tools  # Update the outer variable
                 
+                # Case 1: Model already included the data (Kimi token format with embedded results)
+                if embedded_data:
+                    logger.info(f"[CHAT] Found embedded data - formatting directly")
+                    
+                    # Yield any text before the tool output
+                    if cleaned_text and not cleaned_text.lower().startswith("let me"):
+                        yield {"type": "text", "content": cleaned_text + "\n\n"}
+                    
+                    yield {"type": "thinking", "content": "Formatting results..."}
+                    
+                    # Format the embedded data with a follow-up call
+                    results_summary = json.dumps(embedded_data, indent=2, default=str)
+                    
+                    user_question = ""
+                    for msg in reversed(messages):
+                        if msg.get("role") == "user":
+                            user_question = msg.get("content", "")
+                            break
+                    
+                    summary_system = """You are a financial analyst. Format this data into a clean response:
+
+1. A Markdown table with the key data (Symbol, Price, Change, Volume, etc.)
+2. 1-2 sentences of insight
+3. A follow-up question
+
+NO tool calls. NO XML tags. Just format the data nicely."""
+
+                    follow_up_messages = [
+                        {"role": "system", "content": summary_system},
+                        {"role": "user", "content": f"Question: {user_question}\n\nData to format:\n```json\n{results_summary}\n```"}
+                    ]
+                    
+                    try:
+                        response = self._call_api(follow_up_messages, stream=True, tools=None)
+                        full_response = ""
+                        for chunk in self._parse_stream(response):
+                            if chunk.get("type") == "content":
+                                content = chunk["content"]
+                                full_response += content
+                                yield {"type": "text", "content": content}
+                        
+                        yield {"type": "done", "content": full_response}
+                        return
+                        
+                    except Exception as e:
+                        logger.error(f"[CHAT] Format call failed: {e}")
+                        # Fallback: format the data ourselves
+                        yield {"type": "text", "content": self._format_stocks_table(embedded_data)}
+                        yield {"type": "done", "content": ""}
+                        return
+                
+                # Case 2: Need to execute tool calls
                 if xml_tool_calls:
                     # Found XML tool calls - execute them and get results
                     logger.info(f"[CHAT] ✓ Detected {len(xml_tool_calls)} XML-style tool calls")
