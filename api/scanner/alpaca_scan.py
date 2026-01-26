@@ -11,6 +11,7 @@ Using bulk endpoints: Can scan 7000+ stocks in ~35 requests
 import requests
 import time
 import logging
+import yfinance as yf
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -217,7 +218,68 @@ class AlpacaScanner:
         else:
             return "micro"
     
-    def _process_batch(self, symbols: list[str], asset_info: dict) -> list[dict]:
+    def _fetch_single_yahoo(self, symbol: str) -> tuple[str, dict]:
+        """Fetch Yahoo data for a single symbol (for threading)"""
+        try:
+            ticker = yf.Ticker(symbol)
+            info = ticker.fast_info
+            
+            # Get market cap
+            market_cap = getattr(info, 'market_cap', None)
+            
+            # Get sector/industry (try fast_info first, then full info)
+            sector = None
+            industry = None
+            try:
+                full_info = ticker.info
+                sector = full_info.get('sector')
+                industry = full_info.get('industry')
+            except:
+                pass
+            
+            return symbol, {
+                "market_cap": market_cap,
+                "sector": sector,
+                "industry": industry
+            }
+        except Exception as e:
+            logger.debug(f"Yahoo fetch failed for {symbol}: {e}")
+            return symbol, {"market_cap": None, "sector": None, "industry": None}
+    
+    def _get_yahoo_fundamentals(self, symbols: list[str]) -> dict:
+        """
+        Fetch market cap and sector data from Yahoo Finance using concurrent requests
+        
+        Returns: {symbol: {"market_cap": int, "sector": str, "industry": str}}
+        """
+        result = {}
+        
+        # Use thread pool for concurrent fetching (much faster)
+        # Limit to 20 threads to avoid overwhelming Yahoo
+        max_workers = 20
+        
+        logger.info(f"  Fetching Yahoo data with {max_workers} concurrent threads...")
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all symbols
+            futures = {executor.submit(self._fetch_single_yahoo, s): s for s in symbols}
+            
+            completed = 0
+            for future in as_completed(futures):
+                try:
+                    symbol, data = future.result(timeout=10)
+                    result[symbol] = data
+                except Exception as e:
+                    symbol = futures[future]
+                    result[symbol] = {"market_cap": None, "sector": None, "industry": None}
+                
+                completed += 1
+                if completed % 500 == 0:
+                    logger.info(f"    Yahoo progress: {completed}/{len(symbols)}")
+        
+        return result
+    
+    def _process_batch(self, symbols: list[str], asset_info: dict, yahoo_data: dict = None) -> list[dict]:
         """Process a batch of symbols"""
         results = []
         
@@ -232,6 +294,9 @@ class AlpacaScanner:
         bars = self._get_bars_bulk(symbols)
         
         time.sleep(self.request_delay)
+        
+        # Use provided Yahoo data or empty dict
+        yahoo_data = yahoo_data or {}
         
         for symbol in symbols:
             try:
@@ -278,8 +343,14 @@ class AlpacaScanner:
                 dist_from_high = ((current_price - week_52_high) / week_52_high) * 100 if week_52_high else None
                 dist_from_low = ((current_price - week_52_low) / week_52_low) * 100 if week_52_low else None
                 
-                # Asset info
+                # Asset info from Alpaca
                 asset = asset_info.get(symbol, {})
+                
+                # Yahoo Finance data (market cap, sector, industry)
+                yf_data = yahoo_data.get(symbol, {})
+                market_cap = yf_data.get("market_cap")
+                sector = yf_data.get("sector")
+                industry = yf_data.get("industry")
                 
                 results.append({
                     "symbol": symbol,
@@ -289,10 +360,10 @@ class AlpacaScanner:
                     "volume": current_volume,
                     "avg_volume_20d": round(avg_volume) if avg_volume else None,
                     "relative_volume": round(relative_volume, 2),
-                    "market_cap": None,  # Alpaca doesn't provide this
-                    "market_cap_category": "unknown",
-                    "sector": None,  # Would need another data source
-                    "industry": None,
+                    "market_cap": market_cap,
+                    "market_cap_category": self._categorize_market_cap(market_cap),
+                    "sector": sector,
+                    "industry": industry,
                     "week_52_high": round(week_52_high, 2) if week_52_high else None,
                     "week_52_low": round(week_52_low, 2) if week_52_low else None,
                     "distance_from_52w_high": round(dist_from_high, 2) if dist_from_high else None,
@@ -344,6 +415,12 @@ class AlpacaScanner:
         total = len(symbols)
         logger.info(f"  Scanning {total} valid symbols...")
         
+        # Fetch Yahoo Finance data for market cap, sector, industry
+        logger.info("  Fetching market cap & sector data from Yahoo Finance...")
+        yahoo_data = self._get_yahoo_fundamentals(symbols)
+        yahoo_success = sum(1 for v in yahoo_data.values() if v.get("market_cap"))
+        logger.info(f"  Got market cap data for {yahoo_success}/{total} stocks")
+        
         # Split into batches
         batches = [symbols[i:i + self.batch_size] for i in range(0, total, self.batch_size)]
         logger.info(f"  Processing {len(batches)} batches of {self.batch_size} symbols...")
@@ -353,7 +430,7 @@ class AlpacaScanner:
         
         for i, batch in enumerate(batches):
             try:
-                results = self._process_batch(batch, asset_info)
+                results = self._process_batch(batch, asset_info, yahoo_data)
                 all_results.extend(results)
                 scanned += len(batch)
                 
