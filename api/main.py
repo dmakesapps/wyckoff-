@@ -877,7 +877,8 @@ async def chat(request: Request):
     if stream:
         async def generate():
             for chunk in chat_service.chat_stream(messages):
-                yield f"data: {json.dumps(chunk)}\n\n"
+                # Use default=str to handle non-serializable objects like Timestamps
+                yield f"data: {json.dumps(chunk, default=str)}\n\n"
         
         return StreamingResponse(
             generate(),

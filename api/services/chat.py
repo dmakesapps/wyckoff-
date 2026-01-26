@@ -767,7 +767,7 @@ IMPORTANT: Always provide a complete response with actual data from the results.
                                 "type": "function",
                                 "function": {
                                     "name": tool_name,
-                                    "arguments": json.dumps(tool_args)
+                                    "arguments": json.dumps(tool_args, default=str)
                                 }
                             }]
                         })

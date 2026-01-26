@@ -226,6 +226,12 @@ class StockDataService:
             
             transactions = latest.to_dict('records')
             
+            # Replace NaNs with None for JSON compatibility
+            for t in transactions:
+                for k, v in t.items():
+                    if isinstance(v, float) and (v != v): # Check for NaN
+                        t[k] = None
+            
             # Calculate summary
             buys = insiders[insiders['Text'].str.contains('Buy', case=False, na=False)]
             sales = insiders[insiders['Text'].str.contains('Sale', case=False, na=False)]
@@ -255,6 +261,12 @@ class StockDataService:
             
             # Format results
             data = holders.head(10).to_dict('records')
+            
+            # Replace NaNs with None for JSON compatibility
+            for h in data:
+                for k, v in h.items():
+                    if isinstance(v, float) and (v != v):
+                        h[k] = None
             
             summary = {}
             if major is not None and not major.empty:
