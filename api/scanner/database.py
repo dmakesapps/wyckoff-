@@ -464,6 +464,38 @@ class ScannerDB:
         
         return stats
     
+    def remove_symbols(self, symbols: list[str]) -> int:
+        """
+        Remove invalid/delisted symbols from the database
+        
+        Args:
+            symbols: List of symbols to remove
+            
+        Returns:
+            Number of rows deleted
+        """
+        if not symbols:
+            return 0
+            
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        placeholders = ",".join("?" * len(symbols))
+        cursor.execute(f"DELETE FROM stocks WHERE symbol IN ({placeholders})", symbols)
+        
+        deleted = cursor.rowcount
+        conn.commit()
+        
+        return deleted
+    
+    def get_all_symbols(self) -> list[str]:
+        """Get all symbols currently in the database"""
+        conn = self._get_conn()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT symbol FROM stocks")
+        return [row[0] for row in cursor.fetchall()]
+    
     # ═══════════════════════════════════════════════════════════════
     # FINVIZ-STYLE QUERIES
     # ═══════════════════════════════════════════════════════════════

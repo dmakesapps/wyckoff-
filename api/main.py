@@ -6,7 +6,7 @@ Alpha Discovery API — FastAPI Application
 
 import json
 import threading
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from datetime import datetime, timezone, timedelta
@@ -962,6 +962,70 @@ async def trigger_scan():
     """Manually trigger a market scan"""
     scheduler = get_scheduler()
     return scheduler.trigger_scan_now()
+
+
+@app.get("/api/scanner/validate/{symbol}")
+async def validate_symbol(symbol: str):
+    """
+    Check if a stock symbol is valid and tradeable
+    
+    Returns:
+        valid: bool - True if symbol is active and tradeable
+        message: str - Reason if invalid
+    """
+    scheduler = get_scheduler()
+    
+    # Only works with Alpaca scanner
+    if not scheduler.use_alpaca:
+        raise HTTPException(status_code=501, detail="Validation requires Alpaca scanner")
+    
+    is_valid = scheduler.scanner.is_valid_symbol(symbol.upper())
+    
+    return {
+        "symbol": symbol.upper(),
+        "valid": is_valid,
+        "message": "Active and tradeable" if is_valid else "Symbol may be delisted, halted, or invalid"
+    }
+
+
+@app.post("/api/scanner/validate")
+async def validate_symbols(symbols: list[str] = Body(..., embed=True)):
+    """
+    Validate multiple symbols at once
+    
+    Request body: {"symbols": ["AAPL", "MSFT", "INVALID123"]}
+    
+    Returns:
+        valid: list of valid symbols
+        invalid: list of invalid/delisted symbols
+    """
+    scheduler = get_scheduler()
+    
+    if not scheduler.use_alpaca:
+        raise HTTPException(status_code=501, detail="Validation requires Alpaca scanner")
+    
+    valid, invalid = scheduler.scanner.validate_symbols(symbols)
+    
+    return {
+        "valid": valid,
+        "invalid": invalid,
+        "valid_count": len(valid),
+        "invalid_count": len(invalid)
+    }
+
+
+@app.post("/api/scanner/cleanup")
+async def cleanup_invalid_symbols():
+    """
+    Manually trigger cleanup of invalid/delisted symbols from database
+    """
+    scheduler = get_scheduler()
+    scheduler._cleanup_invalid_symbols()
+    
+    return {
+        "status": "completed",
+        "message": "Invalid symbols removed from database"
+    }
 
 
 @app.get("/api/scanner/unusual-volume")

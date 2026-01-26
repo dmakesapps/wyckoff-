@@ -119,6 +119,9 @@ class ScannerScheduler:
                        f"{result['unusual_volume']} unusual volume, "
                        f"{result['near_52w_high']} near highs")
             
+            # Clean up invalid/delisted symbols from database
+            self._cleanup_invalid_symbols()
+            
             # Calculate and store market indicators
             logger.info("📊 Calculating market indicators...")
             indicators = self.db.calculate_and_store_indicators()
@@ -130,6 +133,32 @@ class ScannerScheduler:
             logger.error(f"Scan failed: {e}")
         finally:
             self._scan_in_progress = False
+    
+    def _cleanup_invalid_symbols(self):
+        """Remove delisted/invalid symbols from the database"""
+        try:
+            if not self.use_alpaca:
+                return  # Only cleanup when using Alpaca (has reliable active symbols list)
+            
+            logger.info("🧹 Cleaning up invalid/delisted symbols...")
+            
+            # Get symbols in DB
+            db_symbols = self.db.get_all_symbols()
+            
+            # Get valid symbols from Alpaca
+            valid_symbols = self.scanner.get_active_symbols()
+            
+            # Find invalid symbols (in DB but not valid according to Alpaca)
+            invalid_symbols = [s for s in db_symbols if s not in valid_symbols]
+            
+            if invalid_symbols:
+                deleted = self.db.remove_symbols(invalid_symbols)
+                logger.info(f"   Removed {deleted} delisted/invalid symbols: {invalid_symbols[:10]}{'...' if len(invalid_symbols) > 10 else ''}")
+            else:
+                logger.info("   No invalid symbols found in database")
+                
+        except Exception as e:
+            logger.warning(f"Cleanup failed (non-critical): {e}")
     
     def trigger_scan_now(self) -> dict:
         """Manually trigger a scan (for API endpoint)"""

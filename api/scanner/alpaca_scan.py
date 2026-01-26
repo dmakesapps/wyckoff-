@@ -31,6 +31,9 @@ class AlpacaScanner:
     - /v2/stocks/bars - Get historical bars for multiple symbols
     
     Rate limit: 200 req/min = can scan 7000+ stocks in ~2-3 minutes
+    
+    IMPORTANT: Uses Alpaca's assets API as the source of truth for valid symbols.
+    This automatically filters out delisted, halted, or invalid stocks.
     """
     
     def __init__(self, db: ScannerDB = None):
@@ -42,6 +45,8 @@ class AlpacaScanner:
         self.data_url = ALPACA_DATA_URL
         self.batch_size = 200  # Alpaca allows up to 200 symbols per request
         self.request_delay = 0.35  # ~170 req/min to stay under 200 limit
+        self._active_symbols_cache = None  # Cache for active symbols
+        self._cache_time = None
     
     def _get_snapshots(self, symbols: list[str]) -> dict:
         """
@@ -123,8 +128,19 @@ class AlpacaScanner:
             logger.error(f"Bars request failed: {e}")
             return {}
     
-    def _get_assets(self) -> dict:
-        """Get asset info (sector, industry, name) from Alpaca"""
+    def _get_assets(self, use_cache: bool = True) -> dict:
+        """
+        Get asset info from Alpaca - ONLY returns active, tradeable stocks
+        This is the source of truth for valid symbols
+        
+        Caches results for 1 hour to reduce API calls
+        """
+        # Check cache (1 hour expiry)
+        if use_cache and self._active_symbols_cache and self._cache_time:
+            cache_age = (datetime.now(timezone.utc) - self._cache_time).total_seconds()
+            if cache_age < 3600:  # 1 hour
+                return self._active_symbols_cache
+        
         url = f"https://paper-api.alpaca.markets/v2/assets"
         params = {"status": "active", "asset_class": "us_equity"}
         
@@ -138,10 +154,52 @@ class AlpacaScanner:
             
             if response.status_code == 200:
                 assets = response.json()
-                return {a["symbol"]: a for a in assets}
+                # Only include tradeable assets (not delisted, halted, etc.)
+                result = {
+                    a["symbol"]: a 
+                    for a in assets 
+                    if a.get("tradable", False) and a.get("status") == "active"
+                }
+                # Update cache
+                self._active_symbols_cache = result
+                self._cache_time = datetime.now(timezone.utc)
+                return result
             return {}
-        except:
+        except Exception as e:
+            logger.error(f"Failed to get Alpaca assets: {e}")
             return {}
+    
+    def get_active_symbols(self) -> set:
+        """
+        Get set of all currently active/tradeable stock symbols
+        Use this to validate symbols before using them
+        """
+        assets = self._get_assets()
+        return set(assets.keys())
+    
+    def is_valid_symbol(self, symbol: str) -> bool:
+        """
+        Check if a symbol is currently active and tradeable
+        
+        Returns False for:
+        - Delisted stocks
+        - Halted stocks  
+        - Invalid/unknown symbols
+        """
+        active_symbols = self.get_active_symbols()
+        return symbol.upper() in active_symbols
+    
+    def validate_symbols(self, symbols: list[str]) -> tuple[list[str], list[str]]:
+        """
+        Validate a list of symbols
+        
+        Returns:
+            (valid_symbols, invalid_symbols)
+        """
+        active = self.get_active_symbols()
+        valid = [s for s in symbols if s.upper() in active]
+        invalid = [s for s in symbols if s.upper() not in active]
+        return valid, invalid
     
     def _categorize_market_cap(self, market_cap: float) -> str:
         """Categorize market cap"""
@@ -266,13 +324,25 @@ class AlpacaScanner:
         if symbols is None:
             symbols = get_full_universe()
         
-        total = len(symbols)
-        logger.info(f"🚀 Starting Alpaca scan of {total} stocks...")
+        original_count = len(symbols)
+        logger.info(f"🚀 Starting Alpaca scan with {original_count} symbols from universe...")
         
-        # Get asset info first
-        logger.info("  Fetching asset info...")
+        # Get asset info first - THIS IS THE SOURCE OF TRUTH FOR VALID SYMBOLS
+        logger.info("  Fetching active/tradeable assets from Alpaca...")
         asset_info = self._get_assets()
-        logger.info(f"  Got info for {len(asset_info)} assets")
+        logger.info(f"  Got {len(asset_info)} active tradeable assets from Alpaca")
+        
+        # CRITICAL: Filter to only scan symbols that Alpaca confirms are active & tradeable
+        # This removes delisted, halted, and invalid symbols
+        valid_symbols = set(asset_info.keys())
+        symbols = [s for s in symbols if s in valid_symbols]
+        
+        filtered_count = original_count - len(symbols)
+        if filtered_count > 0:
+            logger.info(f"  Filtered out {filtered_count} invalid/delisted symbols")
+        
+        total = len(symbols)
+        logger.info(f"  Scanning {total} valid symbols...")
         
         # Split into batches
         batches = [symbols[i:i + self.batch_size] for i in range(0, total, self.batch_size)]
