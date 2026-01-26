@@ -252,47 +252,27 @@ AVAILABLE_TOOLS = [
         "type": "function",
         "function": {
             "name": "search_market",
-            "description": "Advanced market search with multiple filters. Find stocks matching specific criteria.",
+            "description": "Search stocks by sector, price change, or market cap. Keep filters minimal for best results.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "min_price": {
-                        "type": "number",
-                        "description": "Minimum stock price"
-                    },
-                    "max_price": {
-                        "type": "number",
-                        "description": "Maximum stock price"
-                    },
-                    "min_volume": {
-                        "type": "integer",
-                        "description": "Minimum trading volume"
-                    },
-                    "min_rvol": {
-                        "type": "number",
-                        "description": "Minimum relative volume"
+                    "sector": {
+                        "type": "string",
+                        "description": "Sector: 'Healthcare', 'Technology', 'Financial Services', 'Energy', 'Consumer Cyclical', 'Industrials', 'Communication Services', 'Consumer Defensive', 'Basic Materials', 'Real Estate', 'Utilities'"
                     },
                     "min_change": {
                         "type": "number",
-                        "description": "Minimum price change %"
-                    },
-                    "max_change": {
-                        "type": "number",
-                        "description": "Maximum price change %"
+                        "description": "Minimum price change % (use 0.5 for 'up today', -0.5 for 'down today')"
                     },
                     "market_cap_category": {
                         "type": "string",
                         "description": "Market cap: 'micro', 'small', 'mid', 'large', 'mega'",
                         "enum": ["micro", "small", "mid", "large", "mega"]
                     },
-                    "sector": {
-                        "type": "string",
-                        "description": "Sector name"
-                    },
                     "limit": {
                         "type": "integer",
-                        "description": "Number of results",
-                        "default": 50
+                        "description": "Number of results (default 20)",
+                        "default": 20
                     }
                 },
                 "required": []
@@ -403,11 +383,12 @@ Would you like me to show the chart for any of these, or check the recent headli
 - `get_insider_transactions`: Insider trades
 
 ## CRITICAL: FILTER USAGE
-- **START BROAD**: Use minimal filters. Don't combine sector + high change + high volume.
-- **If sector requested**: Just filter by sector, maybe add min_change: 1. NO volume filter.
-- **If "top gainers" requested**: Use scan_top_movers, not search_market.
-- **If 0 results**: Immediately retry with FEWER filters.
-- **NEVER** use min_change > 3 or min_rvol > 1.5 unless user explicitly asks.
+- **START BROAD**: Use minimal filters. 
+- **NEVER use min_rvol** - we don't have reliable relative volume data.
+- **If user says "volume"**: Sort by volume, don't filter by it.
+- **If sector requested**: Just filter by sector + min_change: 0.5. That's it.
+- **If "unusual volume" requested**: Use scan_unusual_volume tool OR just get top movers.
+- **If 0 results**: Broaden search immediately.
 """
 
 

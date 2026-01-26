@@ -80,27 +80,24 @@ class AlpacaScanner:
             logger.error(f"Snapshot request failed: {e}")
             return {}
     
-    def _get_bars_bulk(self, symbols: list[str], days: int = 20) -> dict:
+    def _get_bars_single(self, symbol: str, days: int = 20) -> list:
         """
-        Get historical bars for multiple symbols (for calculating avg volume)
+        Get historical bars for a SINGLE symbol using IEX feed (FREE!)
         
-        Note: Free tier may not have access to historical bars - that's OK,
-        we'll calculate relative volume from the snapshot data instead.
-        
-        Returns dict: {symbol: [bars]}
+        SIP data requires paid subscription, but IEX feed is free.
         """
-        url = f"{self.data_url}/v2/stocks/bars"
+        url = f"{self.data_url}/v2/stocks/{symbol}/bars"
         
         end = datetime.now(timezone.utc)
-        start = end - timedelta(days=days + 5)  # Extra days for weekends
+        start = end - timedelta(days=days + 5)
         
         params = {
-            "symbols": ",".join(symbols),
             "timeframe": "1Day",
             "start": start.strftime("%Y-%m-%dT00:00:00Z"),
             "end": end.strftime("%Y-%m-%dT23:59:59Z"),
-            "limit": 10000,
+            "limit": 50,
             "adjustment": "split",
+            "feed": "iex",  # FREE feed - works without paid subscription!
         }
         
         try:
@@ -108,26 +105,33 @@ class AlpacaScanner:
                 url,
                 headers=self.headers,
                 params=params,
-                timeout=60
+                timeout=10
             )
             
             if response.status_code == 200:
-                return response.json().get("bars", {})
-            elif response.status_code == 429:
-                logger.warning("Rate limited on bars, waiting 60s...")
-                time.sleep(60)
-                return self._get_bars_bulk(symbols, days)
-            elif response.status_code == 403:
-                # Free tier doesn't have historical bars - that's OK
-                logger.debug("Historical bars not available (free tier)")
-                return {}
+                return response.json().get("bars", [])
             else:
-                logger.debug(f"Bars endpoint returned {response.status_code}")
-                return {}
+                return []
                 
         except Exception as e:
-            logger.error(f"Bars request failed: {e}")
-            return {}
+            return []
+    
+    def _get_bars_bulk(self, symbols: list[str], days: int = 20) -> dict:
+        """
+        Get historical bars for multiple symbols using INDIVIDUAL requests.
+        This is slower but works on Alpaca free tier.
+        
+        Returns dict: {symbol: [bars]}
+        """
+        results = {}
+        
+        for symbol in symbols:
+            bars = self._get_bars_single(symbol, days)
+            if bars:
+                results[symbol] = bars
+            time.sleep(0.1)  # Small delay to avoid rate limits
+        
+        return results
     
     def _get_assets(self, use_cache: bool = True) -> dict:
         """
@@ -454,6 +458,37 @@ class AlpacaScanner:
             stocks_with_data=len(all_results)
         )
         
+        # Calculate relative volume for top movers (individual API calls - works on free tier)
+        logger.info("  Calculating relative volume for top movers...")
+        
+        # Get top 200 by absolute change % 
+        top_movers = sorted(all_results, key=lambda x: abs(x.get("change_percent", 0)), reverse=True)[:200]
+        
+        updated_count = 0
+        for stock in top_movers:
+            symbol = stock["symbol"]
+            bars = self._get_bars_single(symbol, days=20)
+            
+            if bars and len(bars) > 5:
+                # Calculate average volume from last 20 days (excluding today)
+                volumes = [b.get("v", 0) for b in bars[:-1] if b.get("v")]
+                if volumes:
+                    avg_volume = sum(volumes) / len(volumes)
+                    current_volume = stock["volume"]
+                    
+                    if avg_volume > 0:
+                        rel_vol = current_volume / avg_volume
+                        stock["avg_volume_20d"] = round(avg_volume)
+                        stock["relative_volume"] = round(rel_vol, 2)
+                        stock["is_unusual_volume"] = rel_vol >= 2.0
+                        updated_count += 1
+        
+        logger.info(f"  Updated relative volume for {updated_count} stocks")
+        
+        # Save updated results
+        if updated_count > 0:
+            self.db.bulk_upsert(top_movers)
+        
         summary = {
             "status": "completed",
             "started_at": started_at.isoformat(),
@@ -461,6 +496,7 @@ class AlpacaScanner:
             "duration_seconds": round(duration, 1),
             "stocks_scanned": total,
             "stocks_with_data": len(all_results),
+            "stocks_with_rvol": updated_count,
             "unusual_volume": len([r for r in all_results if r.get("is_unusual_volume")]),
             "near_52w_high": len([r for r in all_results if r.get("is_near_high")]),
             "big_movers": len([r for r in all_results if abs(r.get("change_percent", 0)) > 5]),
