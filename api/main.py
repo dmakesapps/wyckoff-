@@ -330,6 +330,14 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
             }
         
         elif tool_name == "search_market":
+            market_cap_filter = arguments.get("market_cap_category")
+            sector_filter = arguments.get("sector")
+            limit = arguments.get("limit", 50)
+            
+            # If filtering by market_cap or sector, we need Yahoo data
+            needs_yahoo = market_cap_filter is not None or sector_filter is not None
+            
+            # First get results from DB (fast Alpaca data)
             results = scanner_db.search_stocks(
                 min_price=arguments.get("min_price"),
                 max_price=arguments.get("max_price"),
@@ -338,24 +346,68 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
                 max_rvol=arguments.get("max_rvol"),
                 min_change=arguments.get("min_change"),
                 max_change=arguments.get("max_change"),
-                market_cap_category=arguments.get("market_cap_category"),
-                sector=arguments.get("sector"),
-                limit=arguments.get("limit", 50)
+                market_cap_category=None,  # Don't filter by market cap from DB (we'll use Yahoo)
+                sector=None,  # Don't filter by sector from DB
+                limit=200 if needs_yahoo else limit  # Get more if we need to filter
             )
+            
+            if needs_yahoo and results:
+                # Enrich with Yahoo data (only the top results to avoid rate limits)
+                symbols_to_enrich = [r["symbol"] for r in results[:100]]
+                scheduler = get_scheduler()
+                yahoo_data = scheduler.scanner.enrich_with_yahoo(symbols_to_enrich)
+                
+                # Check if Yahoo data was successful
+                yahoo_success = sum(1 for v in yahoo_data.values() if v.get("market_cap"))
+                
+                if yahoo_success > 0:
+                    # Filter by market cap and/or sector
+                    filtered = []
+                    for r in results:
+                        symbol = r["symbol"]
+                        if symbol in yahoo_data:
+                            yf_data = yahoo_data[symbol]
+                            # Apply market cap filter
+                            if market_cap_filter and yf_data.get("market_cap_category") != market_cap_filter:
+                                continue
+                            # Apply sector filter  
+                            if sector_filter and yf_data.get("sector") != sector_filter:
+                                continue
+                            # Update result with Yahoo data
+                            r["market_cap"] = yf_data.get("market_cap")
+                            r["market_cap_category"] = yf_data.get("market_cap_category")
+                            r["sector"] = yf_data.get("sector")
+                            r["industry"] = yf_data.get("industry")
+                            filtered.append(r)
+                            
+                            if len(filtered) >= limit:
+                                break
+                    
+                    results = filtered
+                else:
+                    # Yahoo rate limited - return results without market cap filter
+                    # but notify in the response
+                    results = results[:limit]
+                    for r in results:
+                        r["market_cap_category"] = "unknown (Yahoo rate limited)"
+            else:
+                results = results[:limit]
             
             return {
                 "count": len(results),
                 "filters": {k: v for k, v in arguments.items() if v is not None},
+                "note": "Yahoo Finance rate limited - market cap filter skipped" if needs_yahoo and len(results) > 0 and results[0].get("market_cap_category", "").startswith("unknown") else None,
                 "stocks": [
                     {
                         "symbol": r["symbol"],
-                        "company": r["company_name"],
+                        "company": r.get("company_name"),
                         "price": r["price"],
-                        "change_pct": r["change_percent"],
+                        "change_percent": r["change_percent"],
                         "volume": r["volume"],
-                        "rvol": r["relative_volume"],
-                        "sector": r["sector"],
-                        "market_cap": r["market_cap_category"],
+                        "relative_volume": r["relative_volume"],
+                        "sector": r.get("sector"),
+                        "market_cap": r.get("market_cap"),
+                        "market_cap_category": r.get("market_cap_category", "unknown"),
                     }
                     for r in results
                 ]

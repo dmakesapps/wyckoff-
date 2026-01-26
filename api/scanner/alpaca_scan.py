@@ -218,69 +218,101 @@ class AlpacaScanner:
         else:
             return "micro"
     
-    def _fetch_single_yahoo(self, symbol: str) -> tuple[str, dict]:
-        """Fetch Yahoo data for a single symbol (for threading)"""
-        try:
-            ticker = yf.Ticker(symbol)
-            info = ticker.fast_info
-            
-            # Get market cap
-            market_cap = getattr(info, 'market_cap', None)
-            
-            # Get sector/industry (try fast_info first, then full info)
-            sector = None
-            industry = None
-            try:
-                full_info = ticker.info
-                sector = full_info.get('sector')
-                industry = full_info.get('industry')
-            except:
-                pass
-            
-            return symbol, {
-                "market_cap": market_cap,
-                "sector": sector,
-                "industry": industry
-            }
-        except Exception as e:
-            logger.debug(f"Yahoo fetch failed for {symbol}: {e}")
-            return symbol, {"market_cap": None, "sector": None, "industry": None}
-    
-    def _get_yahoo_fundamentals(self, symbols: list[str]) -> dict:
+    def enrich_with_yahoo(self, symbols: list[str]) -> dict:
         """
-        Fetch market cap and sector data from Yahoo Finance using concurrent requests
+        Fetch market cap and sector data from Yahoo Finance for specific symbols.
+        Called ON-DEMAND when user needs this data (e.g., filtering by market cap).
         
-        Returns: {symbol: {"market_cap": int, "sector": str, "industry": str}}
+        Args:
+            symbols: List of symbols to enrich (should be small, <100)
+            
+        Returns: {symbol: {"market_cap": int, "sector": str, "industry": str, "market_cap_category": str}}
         """
         result = {}
         
-        # Use thread pool for concurrent fetching (much faster)
-        # Limit to 20 threads to avoid overwhelming Yahoo
-        max_workers = 20
+        if not symbols:
+            return result
         
-        logger.info(f"  Fetching Yahoo data with {max_workers} concurrent threads...")
+        logger.info(f"[YAHOO] Enriching {len(symbols)} symbols with market cap/sector data...")
         
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all symbols
-            futures = {executor.submit(self._fetch_single_yahoo, s): s for s in symbols}
-            
-            completed = 0
-            for future in as_completed(futures):
-                try:
-                    symbol, data = future.result(timeout=10)
-                    result[symbol] = data
-                except Exception as e:
-                    symbol = futures[future]
-                    result[symbol] = {"market_cap": None, "sector": None, "industry": None}
+        rate_limited = False
+        
+        for symbol in symbols:
+            if rate_limited:
+                # Skip remaining symbols if we hit rate limit
+                result[symbol] = {
+                    "market_cap": None, 
+                    "sector": None, 
+                    "industry": None,
+                    "market_cap_category": "unknown"
+                }
+                continue
                 
-                completed += 1
-                if completed % 500 == 0:
-                    logger.info(f"    Yahoo progress: {completed}/{len(symbols)}")
+            try:
+                ticker = yf.Ticker(symbol)
+                
+                # Get market cap and sector from info
+                try:
+                    info = ticker.info
+                    market_cap = info.get('marketCap')
+                    sector = info.get('sector')
+                    industry = info.get('industry')
+                except Exception as e:
+                    if "Too Many Requests" in str(e) or "429" in str(e):
+                        logger.warning(f"[YAHOO] Rate limited! Stopping Yahoo enrichment.")
+                        rate_limited = True
+                        result[symbol] = {
+                            "market_cap": None, 
+                            "sector": None, 
+                            "industry": None,
+                            "market_cap_category": "unknown"
+                        }
+                        continue
+                    # Fallback to fast_info for market cap
+                    try:
+                        fast = ticker.fast_info
+                        market_cap = getattr(fast, 'market_cap', None)
+                    except:
+                        market_cap = None
+                    sector = None
+                    industry = None
+                
+                result[symbol] = {
+                    "market_cap": market_cap,
+                    "sector": sector,
+                    "industry": industry,
+                    "market_cap_category": self._categorize_market_cap(market_cap)
+                }
+                
+                # Small delay to avoid rate limits
+                time.sleep(0.2)
+                
+            except Exception as e:
+                error_str = str(e)
+                if "Too Many Requests" in error_str or "429" in error_str:
+                    logger.warning(f"[YAHOO] Rate limited! Stopping Yahoo enrichment.")
+                    rate_limited = True
+                else:
+                    logger.debug(f"Yahoo fetch failed for {symbol}: {e}")
+                    
+                result[symbol] = {
+                    "market_cap": None, 
+                    "sector": None, 
+                    "industry": None,
+                    "market_cap_category": "unknown"
+                }
+        
+        success = sum(1 for v in result.values() if v.get("market_cap"))
+        
+        if rate_limited:
+            logger.warning(f"[YAHOO] Rate limited - only got {success}/{len(symbols)}. Try again in a few minutes.")
+        else:
+            logger.info(f"[YAHOO] Enriched {success}/{len(symbols)} with market cap data")
         
         return result
     
-    def _process_batch(self, symbols: list[str], asset_info: dict, yahoo_data: dict = None) -> list[dict]:
-        """Process a batch of symbols"""
+    def _process_batch(self, symbols: list[str], asset_info: dict) -> list[dict]:
+        """Process a batch of symbols using Alpaca data only (fast scan)"""
         results = []
         
         # Get snapshots (current price data)
@@ -292,11 +324,6 @@ class AlpacaScanner:
         
         # Get historical bars for avg volume
         bars = self._get_bars_bulk(symbols)
-        
-        time.sleep(self.request_delay)
-        
-        # Use provided Yahoo data or empty dict
-        yahoo_data = yahoo_data or {}
         
         for symbol in symbols:
             try:
@@ -346,11 +373,8 @@ class AlpacaScanner:
                 # Asset info from Alpaca
                 asset = asset_info.get(symbol, {})
                 
-                # Yahoo Finance data (market cap, sector, industry)
-                yf_data = yahoo_data.get(symbol, {})
-                market_cap = yf_data.get("market_cap")
-                sector = yf_data.get("sector")
-                industry = yf_data.get("industry")
+                # Note: market_cap, sector, industry are fetched on-demand via Yahoo
+                # when user filters by these fields (see enrich_with_yahoo method)
                 
                 results.append({
                     "symbol": symbol,
@@ -360,10 +384,10 @@ class AlpacaScanner:
                     "volume": current_volume,
                     "avg_volume_20d": round(avg_volume) if avg_volume else None,
                     "relative_volume": round(relative_volume, 2),
-                    "market_cap": market_cap,
-                    "market_cap_category": self._categorize_market_cap(market_cap),
-                    "sector": sector,
-                    "industry": industry,
+                    "market_cap": None,  # Fetched on-demand
+                    "market_cap_category": "unknown",  # Fetched on-demand
+                    "sector": None,  # Fetched on-demand
+                    "industry": None,  # Fetched on-demand
                     "week_52_high": round(week_52_high, 2) if week_52_high else None,
                     "week_52_low": round(week_52_low, 2) if week_52_low else None,
                     "distance_from_52w_high": round(dist_from_high, 2) if dist_from_high else None,
@@ -415,12 +439,6 @@ class AlpacaScanner:
         total = len(symbols)
         logger.info(f"  Scanning {total} valid symbols...")
         
-        # Fetch Yahoo Finance data for market cap, sector, industry
-        logger.info("  Fetching market cap & sector data from Yahoo Finance...")
-        yahoo_data = self._get_yahoo_fundamentals(symbols)
-        yahoo_success = sum(1 for v in yahoo_data.values() if v.get("market_cap"))
-        logger.info(f"  Got market cap data for {yahoo_success}/{total} stocks")
-        
         # Split into batches
         batches = [symbols[i:i + self.batch_size] for i in range(0, total, self.batch_size)]
         logger.info(f"  Processing {len(batches)} batches of {self.batch_size} symbols...")
@@ -430,7 +448,7 @@ class AlpacaScanner:
         
         for i, batch in enumerate(batches):
             try:
-                results = self._process_batch(batch, asset_info, yahoo_data)
+                results = self._process_batch(batch, asset_info)
                 all_results.extend(results)
                 scanned += len(batch)
                 
