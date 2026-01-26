@@ -394,13 +394,20 @@ Would you like me to show the chart for any of these, or check the recent headli
 ## AVAILABLE TOOLS
 - `search_market`: Find stocks by filters (sector, price, volume, market_cap)
 - `scan_top_movers`: Get gainers/losers
-- `scan_unusual_volume`: Find volume spikes
+- `scan_unusual_volume`: Find volume spikes  
 - `scan_by_sector`: Stocks in a sector
 - `get_stock_quote`: Real-time price
 - `get_stock_analysis`: Full analysis with technicals
 - `get_stock_news`: Recent headlines
 - `get_market_news`: General market news
 - `get_insider_transactions`: Insider trades
+
+## CRITICAL: FILTER USAGE
+- **START BROAD**: Use minimal filters. Don't combine sector + high change + high volume.
+- **If sector requested**: Just filter by sector, maybe add min_change: 1. NO volume filter.
+- **If "top gainers" requested**: Use scan_top_movers, not search_market.
+- **If 0 results**: Immediately retry with FEWER filters.
+- **NEVER** use min_change > 3 or min_rvol > 1.5 unless user explicitly asks.
 """
 
 
@@ -622,11 +629,18 @@ class ChatService:
                 xml_tool_calls = extracted_xml_tools  # Update the outer variable
                 
                 # FALLBACK: If model said "Let me search" but didn't call a tool, force it
-                planning_phrases = ["let me search", "let me scan", "i'll find", "let me look", "i'll search", "i need to", "let me find"]
+                planning_phrases = [
+                    "let me search", "let me scan", "let me find", "let me look", "let me check",
+                    "i'll find", "i'll search", "i'll scan", "i'll look", "i'll check",
+                    "i need to", "i will search", "i will find", "i will look",
+                    "searching for", "looking for", "checking for", "scanning for"
+                ]
                 text_lower = text_buffer.lower()
+                logger.info(f"[CHAT] Checking for planning phrases in: '{text_lower[:100]}...'")
                 
-                if any(phrase in text_lower for phrase in planning_phrases) and not xml_tool_calls and not embedded_data:
-                    logger.warning("[CHAT] Model announced plan but didn't call tool - forcing fallback search")
+                detected_phrase = next((p for p in planning_phrases if p in text_lower), None)
+                if detected_phrase and not xml_tool_calls and not embedded_data:
+                    logger.warning(f"[CHAT] ⚠️ Model announced plan ('{detected_phrase}') but didn't call tool - FORCING FALLBACK")
                     
                     # Get user's original question to determine what tool to call
                     user_question = ""
@@ -639,28 +653,35 @@ class ChatService:
                     forced_tool = None
                     forced_args = {}
                     
+                    # Less restrictive searches - just get data, let Kimi analyze
                     if any(kw in user_question for kw in ["biotech", "healthcare", "pharma", "drug"]):
-                        forced_tool = "search_market"
-                        forced_args = {"sector": "Healthcare", "min_change": 1.0, "limit": 15}
+                        forced_tool = "scan_by_sector"
+                        forced_args = {"sector": "Healthcare", "sort_by": "change_percent", "limit": 20}
                     elif any(kw in user_question for kw in ["tech", "software", "ai", "semiconductor"]):
-                        forced_tool = "search_market"
-                        forced_args = {"sector": "Technology", "min_change": 1.0, "limit": 15}
-                    elif any(kw in user_question for kw in ["gainer", "winner", "top", "best", "hot"]):
+                        forced_tool = "scan_by_sector"
+                        forced_args = {"sector": "Technology", "sort_by": "change_percent", "limit": 20}
+                    elif any(kw in user_question for kw in ["energy", "oil", "gas"]):
+                        forced_tool = "scan_by_sector"
+                        forced_args = {"sector": "Energy", "sort_by": "change_percent", "limit": 20}
+                    elif any(kw in user_question for kw in ["finance", "bank", "financial"]):
+                        forced_tool = "scan_by_sector"
+                        forced_args = {"sector": "Financial Services", "sort_by": "change_percent", "limit": 20}
+                    elif any(kw in user_question for kw in ["gainer", "winner", "top", "best", "hot", "return"]):
                         forced_tool = "scan_top_movers"
-                        forced_args = {"direction": "gainers", "limit": 15}
+                        forced_args = {"direction": "gainers", "limit": 20}
                     elif any(kw in user_question for kw in ["loser", "worst", "down", "falling"]):
                         forced_tool = "scan_top_movers"
-                        forced_args = {"direction": "losers", "limit": 15}
-                    elif any(kw in user_question for kw in ["volume", "unusual", "spike"]):
+                        forced_args = {"direction": "losers", "limit": 20}
+                    elif any(kw in user_question for kw in ["volume", "unusual", "spike", "active"]):
                         forced_tool = "scan_unusual_volume"
-                        forced_args = {"min_rvol": 2.0, "limit": 15}
+                        forced_args = {"min_rvol": 1.5, "limit": 20}
                     elif any(kw in user_question for kw in ["breakout", "high", "52"]):
                         forced_tool = "scan_breakout_candidates"
-                        forced_args = {"type": "near_high", "limit": 15}
+                        forced_args = {"type": "near_high", "limit": 20}
                     else:
-                        # Default: general market search for active stocks
+                        # Default: top movers
                         forced_tool = "scan_top_movers"
-                        forced_args = {"direction": "gainers", "limit": 15}
+                        forced_args = {"direction": "gainers", "limit": 20}
                     
                     if forced_tool:
                         xml_tool_calls = [{
@@ -668,9 +689,11 @@ class ChatService:
                             "name": forced_tool,
                             "arguments": forced_args
                         }]
-                        logger.info(f"[CHAT] Forcing tool call: {forced_tool} with {forced_args}")
+                        logger.info(f"[CHAT] 🔧 FORCING TOOL: {forced_tool} with args: {forced_args}")
                         # Clear the text buffer so we don't show "Let me search..."
                         cleaned_text = ""
+                        # Don't yield the planning text - it's useless
+                        text_buffer = ""
                 
                 # Case 1: Model already included the data (Kimi token format with embedded results)
                 if embedded_data:
@@ -808,15 +831,20 @@ NO tool calls. NO XML tags. Just format the data nicely."""
                             break
                     
                     # Simple follow-up prompt that won't trigger more tool calls
-                    summary_system = """You are a financial analyst assistant. The user asked a question and tools have already been executed to fetch the data. Your job is to:
+                    summary_system = """You are a financial analyst. Present the tool results to the user.
 
-1. Present the data in a clean, formatted table (use Markdown)
-2. Add 1-2 sentences of insight/analysis  
-3. End with a follow-up question
+RULES:
+1. If stocks were found: Create a Markdown table (Ticker | Price | Change | Volume | Sector)
+2. If NO stocks found: Say "No exact matches found" and suggest broadening criteria
+3. Add 1-2 sentences of market insight
+4. End with a follow-up question
 
-DO NOT call any tools. DO NOT use XML tags. Just format and present the data below.
-
-IMPORTANT: Always provide a complete response with actual data from the results."""
+FORBIDDEN:
+- Do NOT say "Let me search/check/find"
+- Do NOT mention tool names like scan_unusual_volume
+- Do NOT call any tools
+- Do NOT use XML tags
+- Just present the data you have"""
                     
                     follow_up_messages = [
                         {"role": "system", "content": summary_system},
@@ -858,41 +886,64 @@ IMPORTANT: Always provide a complete response with actual data from the results.
             
             # Handle API-style tool calls (from tool_calls in response)
             if tool_calls and self.tool_executor and not xml_tool_calls:
-                # This handles the standard OpenAI tool_calls format
-                for tool_call in tool_calls:
-                    yield {"type": "tool_call", "name": tool_call["name"], "arguments": tool_call["arguments"]}
+                logger.info(f"[CHAT] Processing {len(tool_calls)} API-style tool calls")
                 
+                # Execute all tools and collect results
+                tool_results = []
                 for tool_call in tool_calls:
                     tool_name = tool_call["name"]
                     tool_args = tool_call["arguments"]
                     
+                    yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
+                    
                     try:
                         result = self.tool_executor(tool_name, tool_args)
                         yield {"type": "tool_result", "name": tool_name, "result": result}
-                        
-                        full_messages.append({
-                            "role": "assistant",
-                            "content": None,
-                            "tool_calls": [{
-                                "id": tool_call.get("id", f"call_{tool_name}"),
-                                "type": "function",
-                                "function": {
-                                    "name": tool_name,
-                                    "arguments": json.dumps(tool_args, default=str)
-                                }
-                            }]
+                        tool_results.append({
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "result": result
                         })
-                        full_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.get("id", f"call_{tool_name}"),
-                            "content": json.dumps(result, default=str)
-                        })
-                        
                     except Exception as e:
                         logger.error(f"Tool execution error: {e}")
                         yield {"type": "error", "content": f"Tool error: {str(e)}"}
+                        tool_results.append({
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "result": {"error": str(e)}
+                        })
                 
-                response = self._call_api(full_messages, stream=True, tools=None)
+                # Use summary system prompt for follow-up (prevents "Let me scan..." responses)
+                results_summary = json.dumps(tool_results, indent=2, default=str)
+                
+                user_question = ""
+                for msg in reversed(messages):
+                    if msg.get("role") == "user":
+                        user_question = msg.get("content", "")
+                        break
+                
+                summary_system = """You are a financial analyst. Present the tool results to the user.
+
+RULES:
+1. If stocks were found: Create a Markdown table (Ticker | Price | Change | Volume | Sector)
+2. If NO stocks found: Say "No exact matches found" and suggest broadening criteria
+3. Add 1-2 sentences of market insight
+4. End with a follow-up question
+
+FORBIDDEN:
+- Do NOT say "Let me search/check/find/scan"
+- Do NOT mention tool names
+- Do NOT call any tools
+- Do NOT use XML tags
+- Just present the data you have"""
+                
+                follow_up_messages = [
+                    {"role": "system", "content": summary_system},
+                    {"role": "user", "content": f"User's question: {user_question}\n\nTool results:\n```json\n{results_summary}\n```\n\nPresent this data helpfully."}
+                ]
+                
+                logger.info(f"[CHAT] Making follow-up call with summary system prompt")
+                response = self._call_api(follow_up_messages, stream=True, tools=None)
                 
                 full_response = ""
                 for chunk in self._parse_stream(response):
