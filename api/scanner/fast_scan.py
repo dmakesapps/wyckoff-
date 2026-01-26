@@ -95,10 +95,34 @@ class FastScanner:
                     if hist.empty:
                         continue
                     
-                    # Calculate metrics
+                    # Calculate metrics - SESSION AWARE VOLUME
                     current_price = info.get('regularMarketPrice') or info.get('currentPrice')
                     prev_close = info.get('regularMarketPreviousClose') or info.get('previousClose')
-                    current_volume = info.get('regularMarketVolume') or info.get('volume', 0)
+                    
+                    # Volume Logic:
+                    # 1. Start with regular market volume
+                    rm_vol = info.get('regularMarketVolume', 0)
+                    
+                    # 2. Check for extended hours volume
+                    pm_vol = info.get('preMarketVolume', 0)
+                    ah_vol = info.get('postMarketVolume', 0)
+                    
+                    # 3. Determine 'Active Volume' based on current state
+                    # If regular volume is 0 or tiny (early morning), usage pre-market volume
+                    # otherwise use regular volume.
+                    # We default to max(regular, pre_market) to capture activity if the day just started
+                    current_volume = 0
+                    if rm_vol and rm_vol > 0:
+                        current_volume = rm_vol
+                    elif pm_vol and pm_vol > 0:
+                        current_volume = pm_vol
+                    else:
+                        current_volume = info.get('volume', 0) # Fallback to generic 'volume' field
+                        
+                    # 4. If volume seems suspiciously low for a major stock (e.g. < 1000) and it's active hours,
+                    # try to use the generic volume (sometimes yfinance puts total there)
+                    if current_volume < 1000 and info.get('volume', 0) > 10000:
+                        current_volume = info.get('volume', 0)
                     
                     if not current_price or not prev_close:
                         continue

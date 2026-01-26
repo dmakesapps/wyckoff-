@@ -1,0 +1,17 @@
+{
+    "mcpServers": {
+        "technicals": {
+            "command": "uvx",
+            "args": [
+                "maverick-mcp"
+            ]
+        },
+        "screener": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "trading-mcp"
+            ]
+        }
+    }
+}

@@ -99,6 +99,28 @@ AVAILABLE_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_price_history",
+            "description": "Get historical price and volume data for a stock. Use this when user asks for 'volume last week', 'price history', 'past month', or 'how did it trade recently'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "symbol": {
+                        "type": "string",
+                        "description": "Stock ticker symbol"
+                    },
+                    "period": {
+                        "type": "string",
+                        "description": "Time period: '1w' (1 week), '1mo' (1 month), '3mo', '6mo', '1y'",
+                        "default": "1mo"
+                    }
+                },
+                "required": ["symbol"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_options_flow",
             "description": "Get options chain data and unusual activity for a stock.",
             "parameters": {

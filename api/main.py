@@ -162,6 +162,42 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
                 "low": quote.low,
             }
         
+        elif tool_name == "get_price_history":
+            symbol = arguments.get("symbol", "").upper()
+            period = arguments.get("period", "1mo").lower()
+            if period == '1w': period = '5d' 
+            
+            # Use stock service logic
+            history = stock_service.get_historical_data(symbol, period=period)
+            if not history:
+                return {"error": f"No history found for {symbol}"}
+                
+            dates = history.get("dates", [])
+            closes = history.get("closes", [])
+            volumes = history.get("volumes", [])
+            
+            data_points = []
+            # Return last 15 points max to avoid blowing context
+            limit = 20
+            start_idx = max(0, len(dates) - limit)
+            
+            for i in range(start_idx, len(dates)):
+                data_points.append({
+                    "date": dates[i],
+                    "close": round(closes[i], 2),
+                    "volume": int(volumes[i])
+                })
+            
+            avg_vol = sum(volumes) / len(volumes) if volumes else 0
+            
+            return {
+                "symbol": symbol,
+                "period": period,
+                "data_points": data_points,
+                "average_volume": int(avg_vol),
+                "summary": f"Retrieved history for {symbol}"
+            }
+        
         elif tool_name == "get_stock_news":
             symbol = arguments.get("symbol", "").upper()
             limit = arguments.get("limit", 10)

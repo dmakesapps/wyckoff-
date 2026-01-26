@@ -44,7 +44,7 @@ class StockDataService:
             "APCA-API-KEY-ID": ALPACA_API_KEY,
             "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
         }
-        self._use_alpaca_quotes = True  # Try Alpaca first for quotes
+        self._use_alpaca_quotes = False  # Changed to False to force Yahoo (better volume logic)
     
     def get_quote(self, symbol: str, prefer_alpaca: bool = True) -> Optional[StockQuote]:
         """
@@ -102,6 +102,8 @@ class StockDataService:
         """Get quote from Yahoo Finance (fallback, has more detail)"""
         try:
             ticker = yf.Ticker(symbol)
+            
+            # 1. Try standard history (daily)
             hist = ticker.history(period="2d")
             
             if hist.empty:
@@ -109,6 +111,28 @@ class StockDataService:
             
             current = hist.iloc[-1]
             previous = hist.iloc[-2] if len(hist) > 1 else current
+            
+            # SESSION AWARE VOLUME STRATEGY
+            # Standard 'Volume' field in daily bar is often delayed/wrong intraday.
+            # We calculate accurate volume by summing 1-minute bars for today if the daily volume seems low.
+            
+            current_volume = int(current["Volume"])
+            
+            # Sanity check: If a major stock has < 1M volume during market hours, something is wrong.
+            # We force a 1-minute interval check to sum up realized volume.
+            if current_volume < 1000000:  # Threshold for "suspiciously low"
+                 try:
+                     # Fetch today's minute data INCLUDING pre/post market
+                     # This ensures we get the "Total Volume" (Pre-market + Open session)
+                     min_hist = ticker.history(period="1d", interval="1m", prepost=True)
+                     if not min_hist.empty:
+                         real_sum_vol = min_hist["Volume"].sum()
+                         # Only replace if the minute sum is greater (implies we caught more trades)
+                         if real_sum_vol > current_volume:
+                             logger.info(f"Corrected volume for {symbol} via minute-sum (inc. pre-market): {current_volume} -> {real_sum_vol}")
+                             current_volume = real_sum_vol
+                 except Exception as err:
+                     logger.warning(f"Failed to fetch minute volume for {symbol}: {err}")
             
             price = float(current["Close"])
             prev_close = float(previous["Close"])
@@ -122,7 +146,7 @@ class StockDataService:
                 high=float(current["High"]),
                 low=float(current["Low"]),
                 close=price,
-                volume=int(current["Volume"]),
+                volume=int(current_volume),
                 previous_close=prev_close,
                 change=change,
                 change_percent=change_pct,
