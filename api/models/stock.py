@@ -89,11 +89,12 @@ class VolumeAnalysis(BaseModel):
     """Volume analysis"""
     current_volume: Optional[int] = None
     avg_volume_20d: Optional[int] = None
-    relative_volume: Optional[float] = None
+    volume_ratio: Optional[float] = None
     is_unusual: Optional[bool] = None
     volume_trend: Optional[str] = None  # "increasing", "decreasing", "stable"
     # Advanced volume metrics
     vwap: Optional[float] = None
+    price_vs_vwap: Optional[str] = None  # "above" or "below"
     obv: Optional[float] = None
     obv_trend: Optional[str] = None
     mfi: Optional[float] = None
