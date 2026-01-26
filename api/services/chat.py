@@ -521,20 +521,25 @@ class ChatService:
             
             # Check for XML-style tool calls in accumulated text
             if text_buffer:
+                logger.info(f"[CHAT] Checking text buffer ({len(text_buffer)} chars) for XML tool calls...")
+                logger.info(f"[CHAT] Buffer preview: {text_buffer[:200]}...")
+                
                 cleaned_text, xml_tool_calls = self._extract_xml_tool_calls(text_buffer)
                 
                 if xml_tool_calls:
                     # Found XML tool calls - don't stream the raw text yet
-                    logger.info(f"Detected {len(xml_tool_calls)} XML-style tool calls")
+                    logger.info(f"[CHAT] ✓ Detected {len(xml_tool_calls)} XML-style tool calls - NOT streaming raw tags")
+                    for tc in xml_tool_calls:
+                        logger.info(f"[CHAT]   Tool: {tc['name']}, Args: {tc['arguments']}")
                     tool_calls.extend(xml_tool_calls)
                     
                     # Only keep the clean text (before tool tags) for later
-                    # We'll generate a new response after tool execution
                     text_before_tools = cleaned_text.split('.')[0] + '...' if cleaned_text else ""
                     if text_before_tools:
                         yield {"type": "thinking", "content": text_before_tools}
                 else:
                     # No XML tool calls - stream the text normally
+                    logger.info(f"[CHAT] No XML tool calls found, streaming text normally")
                     full_response = text_buffer
                     yield {"type": "text", "content": text_buffer}
             
