@@ -6,10 +6,14 @@ Enables Kimi to call Python analysis tools during conversation
 """
 
 import os
+import re
 import json
 import requests
+import logging
 from typing import Generator, Optional, Any
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 from api.config import (
     OPENROUTER_API_KEY,
@@ -398,7 +402,9 @@ You: "Here's TSLA with RSI indicator:
 
 RSI is currently at 62, indicating moderate bullish momentum without being overbought..."
 
-Remember: You're talking to traders who want actionable insights, not generic advice."""
+Remember: You're talking to traders who want actionable insights, not generic advice.
+
+IMPORTANT: Use the tool_calls API to call functions. Do NOT output XML tags like <search_market> in your text response."""
 
 
 class ChatService:
@@ -410,6 +416,49 @@ class ChatService:
         self.model = KIMI_MODEL
         self.tool_executor = tool_executor
     
+    # Regex pattern to detect XML-style tool calls in text
+    # Matches: <tool_name> {...json...} </tool_name>
+    TOOL_TAG_PATTERN = re.compile(
+        r'<(get_stock_analysis|get_stock_quote|get_stock_news|get_options_flow|get_market_news|'
+        r'scan_unusual_volume|scan_top_movers|scan_breakout_candidates|scan_by_sector|search_market|get_market_overview)>'
+        r'\s*(\{.*?\})\s*'
+        r'</\1>',
+        re.DOTALL
+    )
+    
+    def _extract_xml_tool_calls(self, text: str) -> tuple[str, list[dict]]:
+        """
+        Extract XML-style tool calls from text and return cleaned text + tool calls
+        
+        Input: "I'll search... <search_market> {"min_price": 5} </search_market> here are results"
+        Output: ("I'll search... here are results", [{"name": "search_market", "arguments": {"min_price": 5}}])
+        """
+        tool_calls = []
+        
+        # Find all matches
+        for match in self.TOOL_TAG_PATTERN.finditer(text):
+            tool_name = match.group(1)
+            json_str = match.group(2)
+            
+            try:
+                arguments = json.loads(json_str)
+            except json.JSONDecodeError:
+                logger.warning(f"Failed to parse tool arguments: {json_str[:100]}")
+                arguments = {}
+            
+            tool_calls.append({
+                "id": f"xml_call_{tool_name}_{len(tool_calls)}",
+                "name": tool_name,
+                "arguments": arguments
+            })
+        
+        # Remove the tool tags from text
+        cleaned_text = self.TOOL_TAG_PATTERN.sub('', text)
+        # Clean up extra whitespace
+        cleaned_text = re.sub(r'\s+', ' ', cleaned_text).strip()
+        
+        return cleaned_text, tool_calls
+    
     def chat_stream(
         self,
         messages: list[dict],
@@ -418,10 +467,15 @@ class ChatService:
         """
         Stream chat response with tool calling support
         
+        Handles both:
+        1. OpenAI-style tool_calls in the API response
+        2. XML-style tool tags in text content (legacy Kimi behavior)
+        
         Yields chunks in format:
         {"type": "text", "content": "..."}
         {"type": "tool_call", "name": "...", "arguments": {...}}
         {"type": "tool_result", "name": "...", "result": {...}}
+        {"type": "thinking", "content": "..."} - When model is processing
         {"type": "done", "content": "full response"}
         {"type": "error", "content": "error message"}
         """
@@ -442,22 +496,20 @@ class ChatService:
             
             full_response = ""
             tool_calls = []
+            text_buffer = ""  # Buffer to accumulate text for XML tool detection
             
             for chunk in self._parse_stream(response):
                 if chunk.get("type") == "content":
-                    full_response += chunk["content"]
-                    yield {"type": "text", "content": chunk["content"]}
+                    text_buffer += chunk["content"]
                     
                 elif chunk.get("type") == "tool_call":
-                    # Validate tool call before yielding
+                    # Validate tool call before adding
                     tool_name = chunk.get("name")
                     tool_args = chunk.get("arguments", {})
                     
-                    # Skip invalid tool calls (name must be a non-empty string)
                     if not tool_name or not isinstance(tool_name, str):
                         continue
                     
-                    # Ensure arguments is a dict
                     if not isinstance(tool_args, dict):
                         tool_args = {}
                     
@@ -466,20 +518,41 @@ class ChatService:
                         "name": tool_name,
                         "arguments": tool_args
                     })
-                    yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
             
-            # Execute tool calls if any
+            # Check for XML-style tool calls in accumulated text
+            if text_buffer:
+                cleaned_text, xml_tool_calls = self._extract_xml_tool_calls(text_buffer)
+                
+                if xml_tool_calls:
+                    # Found XML tool calls - don't stream the raw text yet
+                    logger.info(f"Detected {len(xml_tool_calls)} XML-style tool calls")
+                    tool_calls.extend(xml_tool_calls)
+                    
+                    # Only keep the clean text (before tool tags) for later
+                    # We'll generate a new response after tool execution
+                    text_before_tools = cleaned_text.split('.')[0] + '...' if cleaned_text else ""
+                    if text_before_tools:
+                        yield {"type": "thinking", "content": text_before_tools}
+                else:
+                    # No XML tool calls - stream the text normally
+                    full_response = text_buffer
+                    yield {"type": "text", "content": text_buffer}
+            
+            # Execute tool calls if any (either from API or XML)
             if tool_calls and self.tool_executor:
+                # Notify frontend that we're executing tools
+                for tool_call in tool_calls:
+                    yield {"type": "tool_call", "name": tool_call["name"], "arguments": tool_call["arguments"]}
+                
                 for tool_call in tool_calls:
                     tool_name = tool_call["name"]
                     tool_args = tool_call["arguments"]
                     
-                    # Execute the tool
                     try:
                         result = self.tool_executor(tool_name, tool_args)
                         yield {"type": "tool_result", "name": tool_name, "result": result}
                         
-                        # Add tool result to messages and continue conversation
+                        # Add tool result to messages
                         full_messages.append({
                             "role": "assistant",
                             "content": None,
@@ -499,19 +572,28 @@ class ChatService:
                         })
                         
                     except Exception as e:
+                        logger.error(f"Tool execution error: {e}")
                         yield {"type": "error", "content": f"Tool error: {str(e)}"}
                 
-                # Continue conversation with tool results
+                # Continue conversation with tool results - get the actual response
                 response = self._call_api(full_messages, stream=True, tools=None)
                 
+                full_response = ""  # Reset for final response
                 for chunk in self._parse_stream(response):
                     if chunk.get("type") == "content":
-                        full_response += chunk["content"]
-                        yield {"type": "text", "content": chunk["content"]}
+                        content = chunk["content"]
+                        # Double-check the response for any XML tags (shouldn't happen but be safe)
+                        if '<' in content and '>' in content:
+                            cleaned, _ = self._extract_xml_tool_calls(content)
+                            if cleaned != content:
+                                content = cleaned
+                        full_response += content
+                        yield {"type": "text", "content": content}
             
             yield {"type": "done", "content": full_response}
             
         except Exception as e:
+            logger.error(f"Chat stream error: {e}")
             yield {"type": "error", "content": str(e)}
     
     def chat_sync(
