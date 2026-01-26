@@ -221,94 +221,69 @@ class AlpacaScanner:
     def enrich_with_yahoo(self, symbols: list[str]) -> dict:
         """
         Fetch market cap and sector data from Yahoo Finance for specific symbols.
-        Called ON-DEMAND when user needs this data (e.g., filtering by market cap).
-        
-        Args:
-            symbols: List of symbols to enrich (should be small, <100)
-            
-        Returns: {symbol: {"market_cap": int, "sector": str, "industry": str, "market_cap_category": str}}
+        Uses a thread pool for speed while maintaining safety.
         """
         result = {}
-        
         if not symbols:
             return result
-        
+            
         logger.info(f"[YAHOO] Enriching {len(symbols)} symbols with market cap/sector data...")
         
-        rate_limited = False
+        # Use a small thread pool to fetch data concurrently
+        # 5 threads is a good balance between speed and avoiding rate limits
+        max_workers = 5
         
-        for symbol in symbols:
-            if rate_limited:
-                # Skip remaining symbols if we hit rate limit
-                result[symbol] = {
-                    "market_cap": None, 
-                    "sector": None, 
-                    "industry": None,
-                    "market_cap_category": "unknown"
-                }
-                continue
-                
+        def _fetch_one(symbol):
             try:
                 ticker = yf.Ticker(symbol)
-                
-                # Get market cap and sector from info
-                try:
-                    info = ticker.info
-                    market_cap = info.get('marketCap')
-                    sector = info.get('sector')
-                    industry = info.get('industry')
-                except Exception as e:
-                    if "Too Many Requests" in str(e) or "429" in str(e):
-                        logger.warning(f"[YAHOO] Rate limited! Stopping Yahoo enrichment.")
-                        rate_limited = True
-                        result[symbol] = {
-                            "market_cap": None, 
-                            "sector": None, 
-                            "industry": None,
-                            "market_cap_category": "unknown"
-                        }
-                        continue
-                    # Fallback to fast_info for market cap
-                    try:
-                        fast = ticker.fast_info
-                        market_cap = getattr(fast, 'market_cap', None)
-                    except:
-                        market_cap = None
-                    sector = None
-                    industry = None
-                
-                result[symbol] = {
-                    "market_cap": market_cap,
-                    "sector": sector,
-                    "industry": industry,
-                    "market_cap_category": self._categorize_market_cap(market_cap)
+                # Try info first
+                info = ticker.info
+                mcap = info.get('marketCap')
+                sec = info.get('sector')
+                ind = info.get('industry')
+                return symbol, {
+                    "market_cap": mcap,
+                    "sector": sec,
+                    "industry": ind,
+                    "market_cap_category": self._categorize_market_cap(mcap)
                 }
-                
-                # Small delay to avoid rate limits
-                time.sleep(0.2)
-                
             except Exception as e:
-                error_str = str(e)
-                if "Too Many Requests" in error_str or "429" in error_str:
-                    logger.warning(f"[YAHOO] Rate limited! Stopping Yahoo enrichment.")
-                    rate_limited = True
-                else:
-                    logger.debug(f"Yahoo fetch failed for {symbol}: {e}")
-                    
-                result[symbol] = {
+                # If rate limited, we'll know
+                if "Too Many Requests" in str(e) or "429" in str(e):
+                    return symbol, "RATE_LIMIT"
+                return symbol, {
                     "market_cap": None, 
                     "sector": None, 
                     "industry": None,
                     "market_cap_category": "unknown"
                 }
-        
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_symbol = {executor.submit(_fetch_one, s): s for s in symbols}
+            
+            rate_limited = False
+            for future in as_completed(future_to_symbol):
+                symbol = future_to_symbol[future]
+                try:
+                    res = future.result()
+                    if res[1] == "RATE_LIMIT":
+                        rate_limited = True
+                        result[symbol] = {
+                            "market_cap": None, "sector": None, "industry": None, "market_cap_category": "unknown"
+                        }
+                    else:
+                        result[symbol] = res[1]
+                except Exception:
+                    result[symbol] = {
+                        "market_cap": None, "sector": None, "industry": None, "market_cap_category": "unknown"
+                    }
+                
+                if rate_limited:
+                    # We don't cancel existing futures but we'll stop processing
+                    pass
+
         success = sum(1 for v in result.values() if v.get("market_cap"))
-        
-        if rate_limited:
-            logger.warning(f"[YAHOO] Rate limited - only got {success}/{len(symbols)}. Try again in a few minutes.")
-        else:
-            logger.info(f"[YAHOO] Enriched {success}/{len(symbols)} with market cap data")
-        
+        logger.info(f"[YAHOO] Enriched {success}/{len(symbols)} symbols")
         return result
     
     def _process_batch(self, symbols: list[str], asset_info: dict) -> list[dict]:

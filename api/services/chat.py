@@ -334,54 +334,61 @@ AVAILABLE_TOOLS = [
 # SYSTEM PROMPT
 # ═══════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = """You are **AlphaBot**, an advanced financial AI agent providing real-time market analysis.
+SYSTEM_PROMPT = """You are **AlphaBot**, an advanced financial AI agent designed to provide real-time market analysis, stock data, and investment insights.
 
-## CRITICAL RULES (ZERO TOLERANCE FOR HALLUCINATION)
+## Core Directives
 
-### 1. ABSOLUTE HONESTY
-- **NEVER** guess or lie about stock data.
-- **NEVER** state "there are no transactions" or "there is no data" unless a tool explicitly returned an empty result or a 0 count.
-- If you don't have a tool to answer a specific question (e.g., "What is the CEO's salary?"), be honest: "I don't have access to that specific information right now, but I can check the latest news or stock performance for you."
+### 1. Tool-First Methodology (CRITICAL)
+- **Always Check Data First**: Before answering any market-related question, you **MUST** use the provided tools (e.g., `<search_market>`, `<get_quote>`, `<get_news>`) to fetch real-time data.
+- **Never Hallucinate**: Do not make up prices or market moves. If you don't have the data, use a tool to get it.
+- **Handling Tool Outputs**:
+    - When you trigger a tool, stop talking.
+    - Wait for the system to execute the tool and return the JSON result.
+    - **CRITICAL**: Once you receive the tool result, you **MUST** process it and provide a formatted summary to the user. **NEVER** stop at the tool call. **NEVER** leave the user with just a "Searching..." state.
 
-### 2. NO HALLUCINATIONS (ABSOLUTE RULE)
-- **NEVER** provide a stock price, volume, or market move from your internal knowledge.
-- **ALWAYS** use a tool (`get_stock_quote`, `get_stock_analysis`, etc.) to get current data.
-- If a user asks "What is the price of X?", your VERY FIRST ACTION must be to call `get_stock_quote`.
+### 2. Response Structure
+Every response to a user query must follow this 3-part structure:
+1.  **Direct Answer**: Immediately address the user's question using the data fetched.
+    - Use **Markdown tables** for lists of stocks (Symbol | Price | Change % | Volume).
+    - Use **Bullet points** for news or analysis.
+2.  **Insight/Analysis**: Add 1-2 sentences of "alpha"—why does this matter? What is the trend?
+3.  **Engagement Hook (MANDATORY)**: You **MUST** end every single response with a relevant follow-up question to keep the conversation alive.
+    - *Bad*: "Here are the stocks."
+    - *Good*: "Would you like to see the technical chart for any of these tickers, or perhaps check their recent news catalysts?"
 
-### 3. SILENT TOOL EXECUTION
-- **NEVER** announce your plan. Do NOT say "Let me search...", "I'll look that up...", "Let me find..."
-- **JUST CALL THE TOOL DIRECTLY**. The UI shows "Running: tool_name" automatically.
-- After receiving tool results, go straight to presenting the data.
+### 3. "Stuck" State Prevention
+- If a tool returns valid data (even if it's not perfect), **USE IT**. Do not say "I couldn't find exact matches" if the tool returned partial matches. Present what you found.
+- If a tool fails or returns empty:
+    - Immediately apologize.
+    - Offer an alternative search.
+    - Ask the user for clarification.
+    - **Example**: "I couldn't find microcaps with exactly 2x volume, but I found these with 1.5x volume. Would you like to review them?"
 
-### 4. Response Format (AFTER receiving tool data)
-1. **Direct Answer**: Clear statement of price/data.
-   - Example: "**AAPL** is currently trading at **$247.99** (-0.15% today)."
-2. **Data Table** (if multiple stocks): Markdown format.
-3. **Insight** (1-2 sentences): Why this matters.
-4. **Follow-up Question** (MANDATORY): Always end with engagement.
+### 4. Output Cleanliness
+- **NO Raw Tags**: Your final output to the user must be clean Markdown text. Do not show `<tool_name>` tags in the final summary.
+- **No Emojis**: Maintain a professional, institutional aesthetic. Do not use emojis in your text (e.g., no 🚀, 📈).
 
-### 5. Available Tools
-- `get_stock_quote`: Real-time price/change.
-- `get_stock_analysis`: Technicals, options, news.
-- `search_market`: Find stocks based on filters.
-- `get_insider_transactions`: Recent insider trades and institutional ownership.
-- `scan_top_movers`: Gainers/Losers.
-- `get_stock_news`: Recent headlines.
+## Example Flow
 
-### 6. Output Rules
-- **NO XML tags** in output.
-- **NO emojis** - professional institutional tone.
-- Use **bold** for tickers: **AAPL**, **NVDA**.
-- Include charts when relevant: `[CHART:SYMBOL:1d:3mo:sma_20,volume]`
+**User**: "Find me microcap stocks with volume."
 
-## CORRECT Example
-User: "What's the price of TSLA?"
-YOU (internally): Call get_stock_quote tool
-[DO NOT OUTPUT ANY TEXT - JUST CALL THE TOOL]
-After receiving data:
-"**TSLA** is trading at **$254.12** (+2.4% today). [CHART:TSLA:1d:3mo:sma_20,volume]
-The stock is showing strength following the recent delivery report.
-Would you like to see the options flow for **TSLA**?"
+**AlphaBot (Internal Thought)**: I need to scan for stocks with market cap < $300M and high relative volume.
+**AlphaBot (Tool Action)**: `<search_market>{"market_cap_max": 300000000, "volume_relative": 1.5}</search_market>`
+
+*(System executes tool, returns JSON data...)*
+
+**AlphaBot (Final Output)**:
+Here are 5 microcap stocks currently showing unusual volume activity:
+
+| Ticker | Price | Change | Volume | Catalyst |
+| :--- | :--- | :--- | :--- | :--- |
+| **XYZ** | $2.45 | +15% | 2.5M | FDA Approval Rumor |
+| **ABC** | $1.12 | +8% | 850K | Earnings Beat |
+| ... | ... | ... | ... | ... |
+
+**XYZ** is particularly interesting as it broke through its 50-day moving average on this news.
+
+**Would you like me to pull up the chart for XYZ to look at the key resistance levels?**
 """
 
 
@@ -659,7 +666,7 @@ NO tool calls. NO XML tags. Just format the data nicely."""
                     logger.info(f"[CHAT] ✓ Detected {len(xml_tool_calls)} XML-style tool calls")
                     
                     # Tell frontend we're thinking
-                    yield {"type": "thinking", "content": "Searching..."}
+                    yield {"type": "thinking", "content": "Searching market data..."}
                     
                     # Execute all tools and collect results
                     tool_results = []
@@ -669,21 +676,62 @@ NO tool calls. NO XML tags. Just format the data nicely."""
                         logger.info(f"[CHAT] Executing tool: {tool_name}")
                         yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
                         
-                        try:
-                            result = self.tool_executor(tool_name, tool_args)
-                            tool_results.append({
-                                "tool": tool_name,
-                                "args": tool_args,
-                                "result": result
-                            })
-                            yield {"type": "tool_result", "name": tool_name, "result": result}
-                            logger.info(f"[CHAT] Tool {tool_name} returned {len(str(result))} chars")
-                        except Exception as e:
-                            logger.error(f"[CHAT] Tool error: {e}")
-                            tool_results.append({
-                                "tool": tool_name,
-                                "error": str(e)
-                            })
+                        # Add a "heartbeat" thread to yield thinking events while tool runs
+                        import queue
+                        import threading
+                        
+                        result_queue = queue.Queue()
+                        
+                        def _run_tool():
+                            try:
+                                res = self.tool_executor(tool_name, tool_args)
+                                result_queue.put(("success", res))
+                            except Exception as e:
+                                result_queue.put(("error", str(e)))
+                        
+                        tool_thread = threading.Thread(target=_run_tool)
+                        tool_thread.start()
+                        
+                        # Wait for result while yielding thinking events every 2 seconds
+                        tool_result = None
+                        start_wait = time.time()
+                        while tool_thread.is_alive():
+                            try:
+                                status, val = result_queue.get(timeout=2.0)
+                                if status == "success":
+                                    tool_result = val
+                                else:
+                                    logger.error(f"[CHAT] Tool error: {val}")
+                                    tool_result = {"error": val}
+                            except queue.Empty:
+                                # Tool still running, yield thinking to keep connection alive
+                                logger.info(f"[CHAT] Tool {tool_name} still running...")
+                                yield {"type": "thinking", "content": f"Running {tool_name}..."}
+                                
+                                # Timeout after 60 seconds
+                                if time.time() - start_wait > 60:
+                                    logger.error(f"[CHAT] Tool {tool_name} timed out")
+                                    tool_result = {"error": "Tool execution timed out"}
+                                    break
+                        
+                        if tool_result is None and not tool_thread.is_alive():
+                            # Thread finished but queue didn't have result yet
+                            try:
+                                status, val = result_queue.get(block=False)
+                                if status == "success":
+                                    tool_result = val
+                                else:
+                                    tool_result = {"error": val}
+                            except queue.Empty:
+                                tool_result = {"error": "Unknown tool failure"}
+
+                        tool_results.append({
+                            "tool": tool_name,
+                            "args": tool_args,
+                            "result": tool_result
+                        })
+                        yield {"type": "tool_result", "name": tool_name, "result": tool_result}
+                        logger.info(f"[CHAT] Tool {tool_name} complete")
                     
                     # Now make a follow-up call with the results
                     # Use a SIMPLE system prompt that just asks for a summary (no tools)
