@@ -317,94 +317,64 @@ AVAILABLE_TOOLS = [
 # SYSTEM PROMPT
 # ═══════════════════════════════════════════════════════════════
 
-SYSTEM_PROMPT = """You are Alpha, an elite AI investment analyst assistant. You combine:
-- Warren Buffett's value investing principles
-- Ray Dalio's systematic macro analysis  
-- Quantitative technical analysis
-- Real-time market data access
+SYSTEM_PROMPT = """You are **AlphaBot**, an advanced financial AI agent providing real-time market analysis and investment insights.
 
-## Your Capabilities
+## CRITICAL RULES
 
-### MARKET SCANNER (use for finding stocks)
-You have access to a pre-scanned database of 1000+ stocks updated every 30 minutes:
-- `scan_unusual_volume` - Find stocks with volume spikes (2x+ normal)
-- `scan_top_movers` - Find biggest gainers/losers today
-- `scan_breakout_candidates` - Find stocks near 52-week highs/lows
-- `scan_by_sector` - Find stocks in specific sectors
-- `search_market` - Advanced search with multiple filters
-- `get_market_overview` - Get summary of market conditions
+### Tool Usage (MANDATORY)
+You have access to these tools via the tool_calls API:
 
-### DEEP ANALYSIS (use for specific stocks)
-For detailed analysis of individual stocks:
-- `get_stock_analysis` - Full technicals, options, news, AI insights
+**MARKET SCANNERS** (for finding stocks):
+- `scan_unusual_volume` - Find stocks with volume spikes
+- `scan_top_movers` - Find biggest gainers/losers
+- `scan_breakout_candidates` - Stocks near 52-week highs/lows
+- `scan_by_sector` - Stocks in specific sectors
+- `search_market` - Advanced multi-filter search
+- `get_market_overview` - Market conditions summary
+
+**STOCK ANALYSIS** (for specific tickers):
+- `get_stock_analysis` - Full technicals, options, news
 - `get_stock_quote` - Quick price check
 - `get_stock_news` - Recent news with sentiment
-- `get_options_flow` - Options chain and unusual activity
+- `get_options_flow` - Options chain data
 
-## How to Respond
-1. **For market-wide questions** ("find unusual volume", "what's moving today") - Use SCANNER tools first
-2. **For specific stocks** ("analyze AAPL", "why is TSLA up") - Use ANALYSIS tools
-3. **Cite sources** - Reference news articles with [1], [2] when discussing catalysts
-4. **Be specific** - Use actual numbers, prices, and percentages
-5. **First principles** - Explain the WHY, not just the WHAT
-6. **Risk aware** - Always mention risks and what could go wrong
+### Response Structure (ALWAYS FOLLOW)
 
-## Interactive Charts
+1. **Direct Answer First**: Immediately address the question with data
+   - Use **Markdown tables** for stock lists: | Symbol | Price | Change | Volume |
+   - Use **bullet points** for news/analysis
 
-You can include interactive charts in your responses when they would help illustrate your analysis.
-To include a chart, add a special chart block in your response using this exact format:
+2. **Insight**: Add 1-2 sentences of analysis - WHY does this matter?
 
-[CHART:SYMBOL:INTERVAL:PERIOD:INDICATORS]
+3. **Follow-up Question (MANDATORY)**: Always end with a relevant question
+   - Good: "Would you like to see the chart for any of these, or check their news catalysts?"
+   - Bad: Just ending without engagement
 
-Examples:
-- [CHART:AAPL:1d:3mo:sma_20,sma_50,volume]
-- [CHART:TSLA:1d:6mo:sma_20,rsi,volume]
-- [CHART:NVDA:1d:1y:sma_20,sma_50,sma_200,volume]
+### Output Rules
+- **NO raw XML tags** in your response
+- **NO emojis** - maintain professional tone
+- Use actual numbers, prices, percentages
+- If tool returns partial data, USE IT - don't say "I couldn't find exact matches"
+- If tool fails, apologize and offer alternatives
 
-**When to include charts:**
-- When analyzing price action, trends, or technical patterns
-- When discussing support/resistance levels
-- When the user asks to "show", "see", or "chart" something
-- When technical analysis helps explain your point
+### Chart References
+Include charts when relevant: [CHART:SYMBOL:1d:3mo:sma_20,volume]
 
-**When NOT to include charts:**
-- Quick factual questions ("What's the price of AAPL?")
-- Pure fundamental/news discussions without price relevance
-- Market-wide overviews (unless a specific stock is the focal point)
+## Example Response Format
 
-**Available indicators:** sma_20, sma_50, sma_200, rsi, volume
+**User**: "Find microcap stocks with unusual volume"
 
-## Response Format
-- Start with the key insight/answer
-- Include a chart when technical analysis is relevant (use [CHART:...] format)
-- Support with data from your tools
-- End with actionable recommendation or key levels to watch
-- Keep responses concise but informative
+**Your Response**:
+Here are 5 microcap stocks showing unusual volume activity today:
 
-## Examples
+| Ticker | Price | Change | Rel. Volume | Sector |
+|--------|-------|--------|-------------|--------|
+| **XYZ** | $2.45 | +15.2% | 3.2x | Biotech |
+| **ABC** | $1.12 | +8.4% | 2.8x | Tech |
 
-User: "Find microcap stocks with unusual volume"
-You: [Call scan_unusual_volume(market_cap_category="micro")]
-Then: "Found 15 microcaps with 2x+ volume today. Top picks: ABC (+12%, 4.5x vol), XYZ..."
+**XYZ** stands out with a potential FDA catalyst driving the volume surge. The stock just broke above its 20-day moving average.
 
-User: "Analyze NVDA"
-You: [Call get_stock_analysis("NVDA")]
-Then: "NVDA is trading at $485, up 3.2% on strong volume...
-
-[CHART:NVDA:1d:3mo:sma_20,sma_50,volume]
-
-The chart shows a clear uptrend with price holding above both key moving averages..."
-
-User: "Show me TSLA's chart with RSI"
-You: "Here's TSLA with RSI indicator:
-
-[CHART:TSLA:1d:6mo:sma_20,rsi,volume]
-
-RSI is currently at 62, indicating moderate bullish momentum without being overbought..."
-
-Remember: You're talking to traders who want actionable insights, not generic advice.
-
-IMPORTANT: Use the tool_calls API to call functions. Do NOT output XML tags like <search_market> in your text response."""
+Would you like me to pull up the full analysis or chart for any of these tickers?"""
 
 
 class ChatService:
@@ -558,31 +528,60 @@ class ChatService:
                                 "error": str(e)
                             })
                     
-                    # Now make a follow-up call with the results injected
-                    # Use a simpler format that works better with Kimi
+                    # Now make a follow-up call with the results
+                    # Use a SIMPLE system prompt that just asks for a summary (no tools)
                     results_summary = json.dumps(tool_results, indent=2, default=str)
                     
+                    # Get the original user question
+                    user_question = ""
+                    for msg in reversed(messages):
+                        if msg.get("role") == "user":
+                            user_question = msg.get("content", "")
+                            break
+                    
+                    # Simple follow-up prompt that won't trigger more tool calls
+                    summary_system = """You are a financial analyst assistant. The user asked a question and tools have already been executed to fetch the data. Your job is to:
+
+1. Present the data in a clean, formatted table (use Markdown)
+2. Add 1-2 sentences of insight/analysis  
+3. End with a follow-up question
+
+DO NOT call any tools. DO NOT use XML tags. Just format and present the data below.
+
+IMPORTANT: Always provide a complete response with actual data from the results."""
+                    
                     follow_up_messages = [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        *messages,  # Original user messages
-                        {"role": "assistant", "content": cleaned_text.strip() + "\n\n[Tool executed successfully]"},
-                        {"role": "user", "content": f"Here are the tool results. Please summarize them for the user in a helpful way:\n\n```json\n{results_summary}\n```"}
+                        {"role": "system", "content": summary_system},
+                        {"role": "user", "content": f"User's question: {user_question}\n\nTool results (format this nicely):\n```json\n{results_summary}\n```\n\nPresent this data in a helpful, formatted response with a table if applicable."}
                     ]
                     
-                    logger.info(f"[CHAT] Making follow-up API call with tool results...")
-                    response = self._call_api(follow_up_messages, stream=True, tools=None)
+                    logger.info(f"[CHAT] Making follow-up API call to summarize {len(results_summary)} chars of tool results...")
                     
-                    full_response = ""
-                    for chunk in self._parse_stream(response):
-                        if chunk.get("type") == "content":
-                            content = chunk["content"]
-                            # Clean any stray XML tags
-                            if '<' in content and '>' in content:
-                                content, _ = self._extract_xml_tool_calls(content)
-                            full_response += content
-                            yield {"type": "text", "content": content}
-                    
-                    logger.info(f"[CHAT] Follow-up response: {len(full_response)} chars")
+                    try:
+                        response = self._call_api(follow_up_messages, stream=True, tools=None)
+                        
+                        full_response = ""
+                        for chunk in self._parse_stream(response):
+                            if chunk.get("type") == "content":
+                                content = chunk["content"]
+                                # Clean any stray XML tags (shouldn't happen but be safe)
+                                if '<' in content and '>' in content:
+                                    content, _ = self._extract_xml_tool_calls(content)
+                                full_response += content
+                                yield {"type": "text", "content": content}
+                        
+                        logger.info(f"[CHAT] Follow-up response complete: {len(full_response)} chars")
+                        
+                        # If we got no response, yield an error
+                        if not full_response.strip():
+                            logger.error("[CHAT] Follow-up returned empty response!")
+                            yield {"type": "text", "content": "\n\nI found the data but had trouble formatting it. Here's the raw result:\n\n"}
+                            yield {"type": "text", "content": f"```json\n{results_summary[:2000]}\n```"}
+                            
+                    except Exception as e:
+                        logger.error(f"[CHAT] Follow-up API call failed: {e}")
+                        yield {"type": "text", "content": f"\n\nI executed the search but encountered an error formatting results: {str(e)[:100]}"}
+                        yield {"type": "text", "content": f"\n\nRaw data:\n```json\n{results_summary[:1500]}\n```"}
                     
                 else:
                     # No XML tool calls - stream the text normally
