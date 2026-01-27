@@ -1,0 +1,171 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Force spacing overrides to ensure readability matches Claude style */
+.prose p {
+    margin-bottom: 2rem !important;
+    line-height: 2 !important;
+    /* leading-loose */
+    color: #d1d5db;
+    /* gray-300 */
+}
+
+/* Specific styling for the 'Key Insight' or Main Headers */
+.prose h1,
+.prose h2 {
+    margin-top: 4rem !important;
+    /* Huge section break */
+    margin-bottom: 1.5rem !important;
+    font-family: serif;
+    font-weight: 500;
+    color: #f3f4f6;
+    /* gray-100 */
+}
+
+.prose h3 {
+    margin-top: 2.5rem !important;
+    margin-bottom: 1rem !important;
+    font-family: serif;
+    color: #34d399;
+    /* emerald-400 */
+}
+
+.prose ul {
+    margin-bottom: 2.5rem !important;
+    padding-left: 0 !important;
+    /* Reset padding to align better */
+}
+
+.prose li {
+    margin-bottom: 1rem !important;
+    /* Spacing between bullets */
+    padding-left: 1rem;
+    line-height: 1.75;
+}
+
+/* Remove markers default styling to handle custom if needed, or keep accent */
+.prose li::marker {
+    color: var(--accent);
+}
+
+/* 
+   LAYOUT FIXES:
+   Switching to Flex-based scrolling to ensure Input respects Sidebar resizing 
+   instead of being fixed to viewport.
+*/
+
+.app-layout {
+    height: 100vh !important;
+    overflow: hidden !important;
+}
+
+/* Default: Allow main content to scroll (for Positions, Watchlists, etc.) */
+.main-content {
+    overflow-y: auto !important;
+    height: 100vh !important;
+    display: block;
+    /* Default block layout */
+}
+
+/* Chat Mode: Lock main scroll, let chat container scroll internally */
+/* Using :has() to detect if we are on the Chat page */
+.main-content:has(.chat-container) {
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
+
+/* Chat Container takes full height and manages its own scroll */
+.chat-container {
+    height: 100% !important;
+    width: 100% !important;
+    position: relative !important;
+    overflow: hidden !important;
+    display: flex !important;
+    flex-direction: column !important;
+}
+
+/* Input Container positioned absolutely within the relative Chat Container */
+.input-container-bottom {
+    position: absolute !important;
+    bottom: 0 !important;
+    left: 50% !important;
+    transform: translateX(-50%) !important;
+    width: 100% !important;
+    max-width: 900px !important;
+    background-color: var(--bg) !important;
+    z-index: 50 !important;
+    padding-bottom: 2rem !important;
+    padding-top: 1rem !important;
+}
+
+/* Messages container scrolls internally */
+.messages-container {
+    flex: 1 !important;
+    width: 100% !important;
+    max-width: 900px !important;
+    margin: 0 auto !important;
+    overflow-y: auto !important;
+    height: auto !important;
+    /* Flex takes care of height */
+    padding-bottom: 14rem !important;
+    /* Padding for scrolling past input */
+}
+
+/* Ensure prompt input takes full width of container */
+.prompt-input {
+    width: 100% !important;
+}
+
+/* Thinking & Status Indicators */
+.status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 0.75rem 1.25rem;
+    background: rgba(30, 41, 59, 0.4);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 9999px;
+    margin: 1.5rem auto;
+    width: fit-content;
+    font-size: 0.875rem;
+    color: #94a3b8;
+    backdrop-filter: blur(8px);
+    animation: statusFadeIn 0.3s ease-out;
+}
+
+.thinking-indicator-mini {
+    width: 8px;
+    height: 8px;
+    background-color: var(--accent);
+    border-radius: 50%;
+    animation: miniPulse 1.5s infinite ease-in-out;
+    box-shadow: 0 0 10px var(--accent-low);
+}
+
+@keyframes miniPulse {
+
+    0%,
+    100% {
+        transform: scale(1);
+        opacity: 0.5;
+    }
+
+    50% {
+        transform: scale(1.5);
+        opacity: 1;
+    }
+}
+
+@keyframes statusFadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}

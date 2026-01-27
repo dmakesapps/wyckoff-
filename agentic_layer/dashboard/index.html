@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek Agent Dashboard</title>
+    <link rel="stylesheet" href="index.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fira+Code:wght@400&display=swap"
+        rel="stylesheet">
+</head>
+
+<body>
+    <header>
+        <h1>
+            <span class="status-dot" id="status-dot"></span>
+            Minimax Agent
+        </h1>
+        <div style="font-size: 0.8rem; color: #666;">Model: abab6.5s-chat // Autonomous</div>
+    </header>
+
+    <main>
+        <!-- Left Panel: Code Views -->
+        <div class="panel panel-left">
+            <div class="panel-header">
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab('chat')">Chat History</div>
+                </div>
+                <span>Live View</span>
+            </div>
+            <div class="code-container" id="code-view">
+                Loading code...
+            </div>
+            <div class="chat-view" id="chat-view">
+                <!-- Chat messages injected here -->
+            </div>
+        </div>
+
+        <!-- Right Panel: Logs & Interaction -->
+        <div class="panel panel-right">
+            <div class="panel-header">
+                Agent Logs
+                <button onclick="clearLogs()"
+                    style="background:none; border:none; color:inherit; cursor:pointer; font-size: 0.7rem;">Clear</button>
+            </div>
+            <div class="log-container" id="log-view">
+                <!-- Logs injected here -->
+            </div>
+
+            <div class="input-area">
+                <div class="command-input-wrapper">
+                    <textarea id="message-input" placeholder="Give instructions to the agent..."
+                        onkeydown="handleEnter(event)"></textarea>
+                    <button class="send-btn" onclick="sendMessage()">Send</button>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // State
+        let currentTab = 'chat';
+        let codeData = { target: '', test: '' };
+        let lastHistoryLength = 0;
+
+        async function fetchLogs() {
+            try {
+                const res = await fetch('/api/logs');
+                const data = await res.json();
+                const container = document.getElementById('log-view');
+                container.innerHTML = '';
+
+                data.logs.forEach(line => {
+                    const div = document.createElement('div');
+                    div.className = 'log-entry';
+                    div.textContent = line;
+
+                    if (line.includes("ERROR")) div.classList.add('error');
+                    else if (line.includes("WARNING")) div.classList.add('warning');
+                    else if (line.includes("INFO")) div.classList.add('info');
+
+                    container.appendChild(div);
+                });
+
+                // Auto scroll to bottom
+                container.scrollTop = container.scrollHeight;
+            } catch (e) {
+                console.error("Failed to fetch logs", e);
+            }
+        }
+
+        async function fetchState() {
+            try {
+                const res = await fetch('/api/state');
+                const data = await res.json();
+                codeData.target = data.target_code;
+                codeData.test = data.test_code;
+                renderCode();
+            } catch (e) {
+                console.error("Failed to fetch state", e);
+            }
+        }
+
+        function renderCode() {
+            const el = document.getElementById('code-view');
+            const chatEl = document.getElementById('chat-view');
+
+            if (currentTab === 'chat') {
+                el.style.display = 'none';
+                chatEl.classList.add('active');
+            } else {
+                el.style.display = 'block';
+                chatEl.classList.remove('active');
+                el.textContent = currentTab === 'target' ? codeData.target : codeData.test;
+            }
+        }
+
+        async function fetchChatHistory() {
+            if (currentTab !== 'chat') return;
+            try {
+                const res = await fetch('/api/chat/history');
+                const data = await res.json();
+
+                // Re-render if new messages arrived OR if we suspect the thinking state changed
+                // (Since we can't easily detect thinking state change from history length alone, just re-render or do smart diff)
+                // For simplicity, we re-render every time
+                renderChat(data.history);
+                lastHistoryLength = data.history.length;
+            } catch (e) {
+                console.error("Failed chat history", e);
+            }
+        }
+
+        function renderChat(history) {
+            const container = document.getElementById('chat-view');
+            container.innerHTML = '';
+
+            history.forEach(msg => {
+                const row = document.createElement('div');
+                row.className = `message-row ${msg.role}`;
+
+                let content = msg.content;
+                let thought = null;
+
+                // Parse <think> block
+                const thinkMatch = content.match(/<think>([\s\S]*?)<\/think>/);
+                if (thinkMatch) {
+                    thought = thinkMatch[1].trim();
+                    content = content.replace(/<think>[\s\S]*?<\/think>/, '').trim();
+                }
+
+                // Render Thought if exists (Assistant only usually)
+                if (thought) {
+                    const tContainer = document.createElement('div');
+                    tContainer.className = 'thought-container';
+
+                    const tHeader = document.createElement('div');
+                    tHeader.className = 'thought-header';
+                    tHeader.innerHTML = '<span>💡 Thought Process</span>';
+                    tHeader.onclick = () => tContent.classList.toggle('open');
+
+                    const tContent = document.createElement('div');
+                    tContent.className = 'thought-content';
+                    tContent.textContent = thought;
+
+                    tContainer.appendChild(tHeader);
+                    tContainer.appendChild(tContent);
+                    row.appendChild(tContainer);
+                }
+
+                const bubble = document.createElement('div');
+                bubble.className = 'bubble';
+                bubble.textContent = content || "(No content)";
+
+                row.appendChild(bubble);
+                container.appendChild(row);
+            });
+
+            // Check if agent is currently thinking (based on logs)
+            const logContainer = document.getElementById('log-view');
+            // We need to look at the latest logs to see if we are waiting for Ollama
+            const statusDot = document.getElementById('status-dot');
+            const modelInfo = document.querySelector('header div');
+
+            if (logContainer && logContainer.lastElementChild) {
+                const logText = logContainer.lastElementChild.textContent;
+
+                if (logText.includes("Falling back")) {
+                    statusDot.style.background = "#ffa500"; // Orange
+                    modelInfo.innerHTML = "Model: DeepSeek-R1-8b (Local Fallback)";
+                } else if (logText.includes("Querying Minimax")) {
+                    statusDot.style.background = "#4caf50"; // Green
+                    modelInfo.innerHTML = "Model: abab6.5s-chat (Minimax)";
+                }
+
+                if (logText.includes("Querying") || logText.includes("Reflecting") || logText.includes("is thinking")) {
+                    const thinkDiv = document.createElement('div');
+                    thinkDiv.className = 'thinking-indicator';
+                    thinkDiv.innerHTML = '<div class="spinner"></div> Agent is thinking...';
+                    container.appendChild(thinkDiv);
+                }
+            }
+
+            // Only scroll if already near bottom
+            if (container.scrollHeight - container.scrollTop - container.clientHeight < 100) {
+                container.scrollTop = container.scrollHeight;
+            }
+        }
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+            event.target.classList.add('active');
+            renderCode();
+            if (tab === 'chat') fetchChatHistory();
+        }
+
+        async function sendMessage() {
+            const input = document.getElementById('message-input');
+            const message = input.value.trim();
+            if (!message) return;
+
+            try {
+                await fetch('/api/message', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+                input.value = '';
+                // Optimistic UI update
+                const container = document.getElementById('log-view');
+                const div = document.createElement('div');
+                div.className = 'log-entry info';
+                div.textContent = `>>> USER SENT: ${message}`;
+                div.style.color = '#fff';
+                container.appendChild(div);
+                container.scrollTop = container.scrollHeight;
+            } catch (e) {
+                alert("Failed to send message");
+            }
+        }
+
+        function handleEnter(e) {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                sendMessage();
+            }
+        }
+
+        // Poll every 2 seconds
+        setInterval(() => {
+            fetchLogs();
+            fetchState();
+            fetchChatHistory();
+        }, 2000);
+
+        // Initial load
+        fetchLogs();
+        fetchState();
+        fetchChatHistory();
+    </script>
+</body>
+
+</html>

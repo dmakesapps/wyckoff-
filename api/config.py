@@ -44,7 +44,10 @@ ALPACA_DATA_URL = "https://data.alpaca.markets"
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Set in .env file
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-KIMI_MODEL = os.getenv("KIMI_MODEL", "moonshotai/kimi-k2")  # Kimi K2 via OpenRouter
+KIMI_MODEL = "moonshotai/kimi-k2-thinking"
+SCOUT_MODEL = "minimax/minimax-m2.1"
+PULSE_MODEL = "minimax/minimax-m2.1"
+STRATEGIST_MODEL = "moonshotai/kimi-k2-thinking"
 
 # Optional: Your app name for OpenRouter rankings
 OPENROUTER_APP_NAME = "Alpha Discovery"

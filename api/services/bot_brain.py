@@ -1,106 +1,149 @@
 """
-AlphaBot Brain - MCP Orchestrator
-Orchestrates connections to 'screener' (trading-mcp) and 'technicals' (maverick-mcp).
+AlphaBot Brain - Market Data Orchestrator
+Fetches real-time price from Alpaca and deep stats from yfinance.
 """
 
 import asyncio
 import logging
 import time
 import json
-from contextlib import AsyncExitStack
+import os
 from typing import Dict, Any, Optional
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
-
-# Direct fallback for immediate stability
 import yfinance as yf
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+# Try importing Alpaca, make it optional to avoid crash if not installed
+try:
+    import alpaca_trade_api as tradeapi
+    ALPACA_AVAILABLE: bool = True
+except ImportError:
+    ALPACA_AVAILABLE: bool = False
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
 class BotBrain:
     """
-    Orchestrator for fetching and merging data from MCP servers.
-    Implements 60s caching to respect rate limits.
+    Orchestrator for fetching market data.
+    Hybrid Logic:
+    - Current Price: Alpaca (Real-time)
+    - Fundamentals/Technicals: Yahoo Finance (Deep Data)
     """
     
-    def __init__(self):
-        # Configuration for the screener (Node.js)
-        self.screener_config = StdioServerParameters(
-            command="npx",
-            args=["-y", "trading-mcp"]
-        )
-        
-        # Configuration for technicals (Python)
-        self.technicals_config = StdioServerParameters(
-            command="uvx",
-            args=["maverick-mcp"]
-        )
-        
-        # In-memory cache: { "key": {"data": ..., "timestamp": ...} }
-        self._cache = {}
-        self._cache_ttl = 60  # 60 seconds
+    def __init__(self) -> None:
+        # In-memory cache
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._cache_ttl: int = 60  # 60 seconds
 
-    def _get_from_cache(self, key: str) -> Optional[Any]:
-        """Retrieve from cache if valid."""
+        # Initialize Alpaca
+        self.alpaca: Optional[tradeapi.REST] = None
+        if ALPACA_AVAILABLE:
+            api_key = os.getenv("ALPACA_API_KEY")
+            secret_key = os.getenv("ALPACA_SECRET_KEY")
+            endpoint = os.getenv("ALPACA_ENDPOINT", "https://paper-api.alpaca.markets")
+            
+            if api_key and secret_key:
+                try:
+                    self.alpaca = tradeapi.REST(api_key, secret_key, endpoint, api_version='v2')
+                    logger.info("Alpaca API connection initialized.")
+                except Exception as e:
+                    logger.error(f"Failed to connect to Alpaca: {e}")
+            else:
+                logger.warning("Alpaca keys not found in environment.")
+        else:
+            logger.warning("alpaca-trade-api not installed.")
+
+    def _get_from_cache(self, key: str) -> Any:
         if key in self._cache:
-            entry = self._cache[key]
-            if time.time() - entry["timestamp"] < self._cache_ttl:
-                logger.info(f"Using cached data for {key}")
-                return entry["data"]
+            cached_data = self._cache[key]
+            if time.time() - cached_data["timestamp"] < self._cache_ttl:
+                return cached_data["data"]
         return None
 
-    def _save_to_cache(self, key: str, data: Any):
-         """Save to cache."""
-         self._cache[key] = {
-             "data": data,
-             "timestamp": time.time()
-         }
-
-    async def get_alpha_data(self, ticker: str) -> Dict[str, Any]:
-        """
-        Fetches data. Falls back to local yfinance if MCP fails
-        to ensure the USER gets data immediately.
-        """
-        ticker = ticker.upper()
-        cache_key = f"alpha_data_{ticker}"
-        
-        # 1. Check Cache
-        cached = self._get_from_cache(cache_key)
-        if cached:
-            return cached
-
-        result = {
-            "ticker": ticker,
-            "price_data": {},
-            "technicals": {},
-            "fundamental_summary": {},
+    def _set_cache(self, key: str, data: Any) -> None:
+        self._cache[key] = {
+            "data": data,
             "timestamp": time.time()
         }
 
-        # FAST PATH: Use local yfinance directly since MCP registry is flaky
+    async def get_alpha_data(self, ticker: str) -> Dict[str, Any]:
+        """Fetch alpha data using Hybrid approach."""
+        ticker = ticker.upper()
+        cache_key = f"alpha_{ticker}"
+        
+        # Check cache
+        cached_data = self._get_from_cache(cache_key)
+        if cached_data is not None:
+            return cached_data
+        
+        logger.info(f"Fetching hybrid data for {ticker}..")
+        
+        # 1. Fetch YFinance Data (Base)
+        # We run this in a thread because yfinance is blocking
         try:
-            logger.info(f"Fetching data for {ticker} via local yfinance fallback...")
+            yf_data = await asyncio.to_thread(self._fetch_yfinance_data, ticker)
+        except Exception as e:
+            logger.error(f"YFinance failed: {e}")
+            yf_data = {"error": str(e), "price_data": {}, "technicals": {}, "fundamental_summary": {}}
+
+        # 2. Fetch Alpaca Price (Real-time Override)
+        alpaca_price = None
+        if self.alpaca:
+            try:
+                alpaca_price = await asyncio.to_thread(self._fetch_alpaca_price, ticker)
+            except Exception as e:
+                logger.error(f"Alpaca failed: {e}")
+
+        # 3. Merge Data
+        if alpaca_price:
+            logger.info(f"Overwriting YFinance price {yf_data.get('price_data', {}).get('current')} with Alpaca price {alpaca_price}")
+            if "price_data" not in yf_data:
+                yf_data["price_data"] = {}
+            yf_data["price_data"]["current"] = alpaca_price
+            yf_data["source"] = "Hybrid (Alpaca + YFinance)"
+        else:
+            yf_data["source"] = "YFinance Only"
+
+        # Cache result
+        self._set_cache(cache_key, yf_data)
+        return yf_data
+
+    def _fetch_alpaca_price(self, ticker: str) -> float:
+        """Get latest trade price from Alpaca."""
+        # Get latest trade
+        trade = self.alpaca.get_latest_trade(ticker)
+        return float(trade.price)
+
+    def _fetch_yfinance_data(self, ticker: str) -> Dict[str, Any]:
+        """Fetch deep stats from yfinance."""
+        try:
             stock = yf.Ticker(ticker)
             info = stock.info
             
-            # extract price
+            # Extract price (backup)
             current = info.get("currentPrice") or info.get("regularMarketPrice") or 0.0
             volume = info.get("volume") or info.get("regularMarketVolume") or 0
             
-            result["price_data"] = {
-                "current": current,
-                "volume": volume,
-                "rel_volume": 1.0 # placeholder
+            result = {
+                "ticker": ticker,
+                "price_data": {
+                    "current": current,
+                    "volume": volume,
+                    "rel_volume": 1.0 
+                },
+                "fundamental_summary": {
+                    "market_cap": info.get("marketCap"),
+                    "sector": info.get("sector"),
+                    "industry": info.get("industry")
+                },
+                "technicals": {},
+                "timestamp": time.time()
             }
             
-            result["fundamental_summary"] = {
-                "market_cap": info.get("marketCap"),
-                "sector": info.get("sector"),
-                "industry": info.get("industry")
-            }
-            
-            # Simple technicals from history
+            # Simple technicals
             hist = stock.history(period="1y")
             if not hist.empty:
                 sma_50 = hist["Close"].rolling(window=50).mean().iloc[-1]
@@ -111,50 +154,11 @@ class BotBrain:
                     "sma_200": sma_200,
                     "trend": "Bullish" if sma_50 > sma_200 else "Bearish"
                 }
-
-            # Cache it
-            self._save_to_cache(cache_key, result)
+                
             return result
-
         except Exception as e:
-            logger.error(f"Local fallback failed: {e}")
-            
-            # FINAL FALLBACK: Mock data to unblock UI testing if Rate Limited
-            if "Too Many Requests" in str(e) or "429" in str(e) or "404" in str(e):
-                logger.warning("Rate limit hit - returning MOCK data for user verification.")
-                result["price_data"] = {
-                    "current": 100.00 if ticker != "NVDA" else 135.50, # Mock price
-                    "volume": 5000000,
-                    "rel_volume": 1.2
-                }
-                result["fundamental_summary"] = {
-                    "market_cap": 2500000000000,
-                    "sector": "Technology (Mock)",
-                    "note": "Data simulated due to Rate Limit"
-                }
-                result["technicals"] = {
-                    "sma_50": 128.00,
-                    "sma_200": 110.00,
-                    "trend": "Bullish (Mock)"
-                }
-                # Save validity to cache so we don't spam mock logs
-                self._save_to_cache(cache_key, result)
-                return result
-            
-            result["error"] = str(e)
-            
-        return result
+            logger.error(f"yfinance internal error: {e}")
+            raise e
 
-    def _parse_mcp_result(self, tool_result) -> Dict[str, Any]:
-        """Helper to verify and parse MCP result."""
-        try:
-            if hasattr(tool_result, 'content') and tool_result.content:
-                text = tool_result.content[0].text
-                import json
-                return json.loads(text)
-        except Exception:
-            pass
-        return {}
-
-# Singleton
-bot_brain = BotBrain()
+# Singleton instance
+bot_brain: BotBrain = BotBrain()

@@ -10,7 +10,9 @@ from fastapi import FastAPI, HTTPException, Query, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Optional, List
+import os
+import json
 
 from api.config import API_TITLE, API_VERSION, API_DESCRIPTION, CORS_ORIGINS
 from api.models.stock import (
@@ -284,9 +286,17 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
                 market_cap_category=market_cap
             )
             
+            # Build formatted markdown for display to save LLM tokens
+            table = "| Ticker | Price | Change | RVOL | Sector |\n"
+            table += "|:---|:---|:---|:---|:---|\n"
+            for r in results[:15]:
+                change_str = f"{r['change_percent']:+.1f}%"
+                table += f"| **{r['symbol']}** | ${r['price']:.2f} | {change_str} | {r['relative_volume']:.1f}x | {r['sector'] or 'N/A'} |\n"
+            
             return {
                 "count": len(results),
                 "filter": f"RVOL >= {min_rvol}x" + (f", {market_cap} cap" if market_cap else ""),
+                "formatted_markdown": table,
                 "stocks": [
                     {
                         "symbol": r["symbol"],
@@ -311,10 +321,18 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
             else:
                 results = scanner_db.get_top_losers(limit=limit, market_cap_category=market_cap)
             
+            # Build formatted markdown
+            table = f"| Ticker | Price | Change | RVOL | Sector |\n"
+            table += "|:---|:---|:---|:---|:---|\n"
+            for r in results[:15]:
+                change_str = f"{r['change_percent']:+.1f}%"
+                table += f"| **{r['symbol']}** | ${r['price']:.2f} | {change_str} | {r['relative_volume']:.1f}x | {r['sector'] or 'N/A'} |\n"
+
             return {
                 "count": len(results),
                 "type": direction,
                 "filter": f"{market_cap} cap" if market_cap else "all",
+                "formatted_markdown": table,
                 "stocks": [
                     {
                         "symbol": r["symbol"],
@@ -338,9 +356,19 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
             else:
                 results = scanner_db.get_near_52w_low(limit=limit, market_cap_category=market_cap)
             
+            # Build formatted markdown
+            title = "Near 52W High" if scan_type == "near_high" else "Near 52W Low"
+            table = f"| Ticker | Price | Change | Dist. High | RVOL |\n"
+            table += "|:---|:---|:---|:---|:---|\n"
+            for r in results[:15]:
+                change_str = f"{r['change_percent']:+.1f}%"
+                dist_str = f"{r['distance_from_52w_high']:.1f}%" if r['distance_from_52w_high'] else "N/A"
+                table += f"| **{r['symbol']}** | ${r['price']:.2f} | {change_str} | {dist_str} | {r['relative_volume']:.1f}x |\n"
+
             return {
                 "count": len(results),
                 "type": scan_type,
+                "formatted_markdown": table,
                 "stocks": [
                     {
                         "symbol": r["symbol"],
@@ -362,10 +390,19 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
             
             results = scanner_db.get_by_sector(sector=sector, sort_by=sort_by, limit=limit)
             
+            # Build formatted markdown
+            table = f"| Ticker | Price | Change | Vol | RVOL |\n"
+            table += "|:---|:---|:---|:---|:---|\n"
+            for r in results[:15]:
+                change_str = f"{r['change_percent']:+.1f}%"
+                vol_str = f"{r['volume']/1000000:.1f}M" if r['volume'] > 1000000 else f"{r['volume']/1000:.1f}K"
+                table += f"| **{r['symbol']}** | ${r['price']:.2f} | {change_str} | {vol_str} | {r['relative_volume']:.1f}x |\n"
+
             return {
                 "sector": sector,
                 "count": len(results),
                 "sorted_by": sort_by,
+                "formatted_markdown": table,
                 "stocks": [
                     {
                         "symbol": r["symbol"],
@@ -398,12 +435,12 @@ def execute_tool(tool_name: str, arguments: dict) -> dict:
                 max_change=arguments.get("max_change"),
                 market_cap_category=None,  # Don't filter by market cap from DB (we'll use Yahoo)
                 sector=None,  # Don't filter by sector from DB
-                limit=200 if needs_yahoo else limit  # Get more if we need to filter
+                limit=50 if needs_yahoo else limit  # Get enough to filter but not too many
             )
             
             if needs_yahoo and results:
-                # Enrich with Yahoo data (only the top results to avoid rate limits)
-                symbols_to_enrich = [r["symbol"] for r in results[:100]]
+                # Enrich with Yahoo data (only the first few to keep it snappy)
+                symbols_to_enrich = [r["symbol"] for r in results[:20]]
                 scheduler = get_scheduler()
                 yahoo_data = scheduler.scanner.enrich_with_yahoo(symbols_to_enrich)
                 
@@ -547,6 +584,45 @@ async def health_check():
             "stocks_in_db": scanner_status.get("db_stats", {}).get("total_stocks", 0),
         }
     }
+
+IDEAS_FILE = os.path.join(os.path.dirname(__file__), "../agentic_layer/knowledge_base/ideas.json")
+
+@app.get("/api/ideas")
+async def get_ideas():
+    """Get ideas generated by the Strategist (Kimi)"""
+    if not os.path.exists(IDEAS_FILE):
+        return []
+    
+    try:
+        with open(IDEAS_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"Error reading ideas: {e}")
+        return []
+
+from agentic_layer.dual_agent import DualAgentSystem
+intelligence_system = DualAgentSystem()
+
+@app.post("/api/intelligence/scan")
+async def run_intelligence_scan(
+    payload: dict = Body(...)
+):
+    """Run a one-off intelligence scan for a ticker"""
+    symbol = payload.get("symbol", "").upper()
+    if not symbol:
+        raise HTTPException(status_code=400, detail="Symbol is required")
+    
+    result = await intelligence_system.run_scan(symbol)
+    return result
+
+@app.get("/api/bot/status")
+async def get_bot_status():
+    """Check if the dual-agent bot is running"""
+    # Simple check for the process
+    import subprocess
+    cmd = "ps aux | grep dual_agent.py | grep -v grep"
+    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    return {"online": len(result.stdout) > 0}
 
 
 # ═══════════════════════════════════════════════════════════════

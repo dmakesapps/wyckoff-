@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 import threading
 
-from api.config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, KIMI_MODEL
+from api.config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, PULSE_MODEL
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +224,7 @@ class MarketPulseService:
                     "Content-Type": "application/json",
                 },
                 json={
-                    "model": KIMI_MODEL,
+                    "model": PULSE_MODEL,
                     "messages": [
                         {"role": "system", "content": self._get_system_prompt()},
                         {"role": "user", "content": prompt}
@@ -232,7 +232,7 @@ class MarketPulseService:
                     "temperature": 0.7,
                     "max_tokens": 1000,
                 },
-                timeout=30
+                timeout=15
             )
             
             response.raise_for_status()

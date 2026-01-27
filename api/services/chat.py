@@ -11,7 +11,7 @@ import json
 import time
 import requests
 import logging
-from typing import Generator, Optional, Any
+from typing import Generator, Optional, Any, List
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,7 @@ from api.config import (
     OPENROUTER_API_KEY,
     OPENROUTER_BASE_URL,
     KIMI_MODEL,
+    SCOUT_MODEL,
     OPENROUTER_APP_NAME,
     OPENROUTER_APP_URL,
 )
@@ -420,7 +421,7 @@ class ChatService:
     def __init__(self, tool_executor=None):
         self.api_key = OPENROUTER_API_KEY or os.getenv("OPENROUTER_API_KEY")
         self.api_base = OPENROUTER_BASE_URL
-        self.model = KIMI_MODEL
+        self.model = SCOUT_MODEL
         self.tool_executor = tool_executor
     
     def _format_stocks_table(self, data: dict) -> str:
@@ -456,6 +457,40 @@ class ChatService:
         
         return table
     
+    def _prune_history(self, messages: List[dict], max_messages: int = 10) -> List[dict]:
+        """Prune history to avoid token bloat from large tables and news lists"""
+        # Keep only the last N messages
+        pruned = messages[-max_messages:] if len(messages) > max_messages else messages
+        
+        new_messages = []
+        for msg in pruned:
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                new_messages.append(msg)
+                continue
+                
+            # If message contains a large markdown table, condense it
+            if "| Ticker |" in content and len(content) > 500:
+                # Keep first sentence/lines, replace table
+                lines = content.split("\n")
+                new_content = ""
+                table_started = False
+                for line in lines:
+                    if "|" in line and "Ticker" in line:
+                        if not table_started:
+                            new_content += "\n[... Previous results table summarized to save memory ...]\n"
+                            table_started = True
+                        continue
+                    if table_started and "|" in line:
+                        continue
+                    new_content += line + "\n"
+                
+                new_messages.append({**msg, "content": new_content.strip()})
+            else:
+                new_messages.append(msg)
+        
+        return new_messages
+
     # Regex pattern to detect XML-style tool calls in text
     # Matches: <tool_name> {...json...} </tool_name>
     TOOL_TAG_PATTERN = re.compile(
@@ -588,6 +623,9 @@ class ChatService:
             yield {"type": "error", "content": "API key not configured"}
             return
         
+        # COST OPTIMIZATION: Prune history to skip old large tables
+        messages = self._prune_history(messages)
+        
         # Add system prompt
         full_messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -602,19 +640,24 @@ class ChatService:
             tool_calls = []
             text_buffer = ""  # Buffer to accumulate text for XML tool detection
             xml_tool_calls = []  # Track XML-style tool calls separately
+            has_streamed = False
             
             for chunk in self._parse_stream(response):
                 if chunk.get("type") == "content":
-                    text_buffer += chunk["content"]
+                    content = chunk["content"]
+                    text_buffer += content
+                    
+                    # Stream immediately if no tool tag start detected
+                    if "<" not in text_buffer:
+                        yield {"type": "text", "content": content}
+                        has_streamed = True
                     
                 elif chunk.get("type") == "tool_call":
-                    # Validate tool call before adding
                     tool_name = chunk.get("name")
                     tool_args = chunk.get("arguments", {})
                     
                     if not tool_name or not isinstance(tool_name, str):
                         continue
-                    
                     if not isinstance(tool_args, dict):
                         tool_args = {}
                     
@@ -635,13 +678,16 @@ class ChatService:
                 planning_phrases = [
                     "let me search", "let me scan", "let me find", "let me look", "let me check",
                     "i'll find", "i'll search", "i'll scan", "i'll look", "i'll check",
-                    "i need to", "i will search", "i will find", "i will look",
-                    "searching for", "looking for", "checking for", "scanning for"
+                    "i need to", "i will search", "i will find", "i will look"
                 ]
                 text_lower = text_buffer.lower()
+                
+                # Don't fallback for simple greetings
+                is_greeting = any(g in text_lower for g in ["hello", "hi ", "hey "])
+                
                 logger.info(f"[CHAT] Checking for planning phrases in: '{text_lower[:100]}...'")
                 
-                detected_phrase = next((p for p in planning_phrases if p in text_lower), None)
+                detected_phrase = None if is_greeting else next((p for p in planning_phrases if p in text_lower), None)
                 if detected_phrase and not xml_tool_calls and not embedded_data:
                     logger.warning(f"[CHAT] ⚠️ Model announced plan ('{detected_phrase}') but didn't call tool - FORCING FALLBACK")
                     
@@ -703,51 +749,16 @@ class ChatService:
                     logger.info(f"[CHAT] Found embedded data - formatting directly")
                     
                     # Yield any text before the tool output
-                    if cleaned_text and not cleaned_text.lower().startswith("let me"):
+                    if cleaned_text and not has_streamed and not cleaned_text.lower().startswith("let me"):
                         yield {"type": "text", "content": cleaned_text + "\n\n"}
                     
-                    yield {"type": "thinking", "content": "Formatting results..."}
+                    # yield {"type": "thinking", "content": "Formatting results..."}
                     
-                    # Format the embedded data with a follow-up call
-                    results_summary = json.dumps(embedded_data, indent=2, default=str)
-                    
-                    user_question = ""
-                    for msg in reversed(messages):
-                        if msg.get("role") == "user":
-                            user_question = msg.get("content", "")
-                            break
-                    
-                    summary_system = """You are a financial analyst. Format this data into a clean response:
-
-1. A Markdown table with the key data (Symbol, Price, Change, Volume, etc.)
-2. 1-2 sentences of insight
-3. A follow-up question
-
-NO tool calls. NO XML tags. Just format the data nicely."""
-
-                    follow_up_messages = [
-                        {"role": "system", "content": summary_system},
-                        {"role": "user", "content": f"Question: {user_question}\n\nData to format:\n```json\n{results_summary}\n```"}
-                    ]
-                    
-                    try:
-                        response = self._call_api(follow_up_messages, stream=True, tools=None)
-                        full_response = ""
-                        for chunk in self._parse_stream(response):
-                            if chunk.get("type") == "content":
-                                content = chunk["content"]
-                                full_response += content
-                                yield {"type": "text", "content": content}
-                        
-                        yield {"type": "done", "content": full_response}
-                        return
-                        
-                    except Exception as e:
-                        logger.error(f"[CHAT] Format call failed: {e}")
-                        # Fallback: format the data ourselves
-                        yield {"type": "text", "content": self._format_stocks_table(embedded_data)}
-                        yield {"type": "done", "content": ""}
-                        return
+                    # LOCAL FORMATTING: Use Python to build the table instead of an expensive LLM call
+                    formatted_table = self._format_stocks_table(embedded_data)
+                    yield {"type": "text", "content": formatted_table}
+                    yield {"type": "done", "content": ""}
+                    return
                 
                 # Case 2: Need to execute tool calls
                 if xml_tool_calls:
@@ -759,60 +770,49 @@ NO tool calls. NO XML tags. Just format the data nicely."""
                     
                     # Execute all tools and collect results
                     tool_results = []
+                    skip_follow_up = False
+                    
                     for tc in xml_tool_calls:
                         tool_name = tc["name"]
                         tool_args = tc["arguments"]
                         logger.info(f"[CHAT] Executing tool: {tool_name}")
                         yield {"type": "tool_call", "name": tool_name, "arguments": tool_args}
                         
-                        # Add a "heartbeat" thread to yield thinking events while tool runs
+                        # Use existing tool execution logic (with heartbeat)
                         import queue
                         import threading
-                        
                         result_queue = queue.Queue()
-                        
                         def _run_tool():
                             try:
                                 res = self.tool_executor(tool_name, tool_args)
                                 result_queue.put(("success", res))
                             except Exception as e:
                                 result_queue.put(("error", str(e)))
-                        
                         tool_thread = threading.Thread(target=_run_tool)
                         tool_thread.start()
                         
-                        # Wait for result while yielding thinking events every 2 seconds
                         tool_result = None
                         start_wait = time.time()
                         while tool_thread.is_alive():
                             try:
                                 status, val = result_queue.get(timeout=2.0)
-                                if status == "success":
-                                    tool_result = val
-                                else:
-                                    logger.error(f"[CHAT] Tool error: {val}")
-                                    tool_result = {"error": val}
+                                if status == "success": tool_result = val
+                                else: tool_result = {"error": val}
                             except queue.Empty:
-                                # Tool still running, yield thinking to keep connection alive
-                                logger.info(f"[CHAT] Tool {tool_name} still running...")
                                 yield {"type": "thinking", "content": f"Running {tool_name}..."}
-                                
-                                # Timeout after 60 seconds
-                                if time.time() - start_wait > 60:
-                                    logger.error(f"[CHAT] Tool {tool_name} timed out")
-                                    tool_result = {"error": "Tool execution timed out"}
-                                    break
+                                if time.time() - start_wait > 30: break
                         
                         if tool_result is None and not tool_thread.is_alive():
-                            # Thread finished but queue didn't have result yet
                             try:
                                 status, val = result_queue.get(block=False)
-                                if status == "success":
-                                    tool_result = val
-                                else:
-                                    tool_result = {"error": val}
-                            except queue.Empty:
-                                tool_result = {"error": "Unknown tool failure"}
+                                tool_result = val if status == "success" else {"error": val}
+                            except: tool_result = {"error": "Unknown tool failure"}
+
+                        # COST OPTIMIZATION: If the tool result already has formatted markdown, 
+                        # display it immediately and skip the follow-up LLM summary.
+                        if isinstance(tool_result, dict) and "formatted_markdown" in tool_result:
+                            yield {"type": "text", "content": "\n\n" + tool_result["formatted_markdown"]}
+                            skip_follow_up = True
 
                         tool_results.append({
                             "tool": tool_name,
@@ -820,9 +820,13 @@ NO tool calls. NO XML tags. Just format the data nicely."""
                             "result": tool_result
                         })
                         yield {"type": "tool_result", "name": tool_name, "result": tool_result}
-                        logger.info(f"[CHAT] Tool {tool_name} complete")
                     
-                    # Now make a follow-up call with the results
+                    if skip_follow_up:
+                        logger.info(f"[CHAT] 💰 Cost saved: Skipping follow-up LLM call (used local formatting)")
+                        yield {"type": "done", "content": ""}
+                        return
+                    
+                    # Now make a follow-up call with the results (only if NOT skipped)
                     # Use a SIMPLE system prompt that just asks for a summary (no tools)
                     results_summary = json.dumps(tool_results, indent=2, default=str)
                     
@@ -857,6 +861,7 @@ FORBIDDEN:
                     logger.info(f"[CHAT] Making follow-up API call to summarize {len(results_summary)} chars of tool results...")
                     
                     try:
+                        yield {"type": "thinking", "content": "Analyzing and formatting results..."}
                         response = self._call_api(follow_up_messages, stream=True, tools=None)
                         
                         full_response = ""
@@ -885,7 +890,8 @@ FORBIDDEN:
                 else:
                     # No XML tool calls - stream the text normally
                     full_response = text_buffer
-                    yield {"type": "text", "content": text_buffer}
+                    if not has_streamed:
+                        yield {"type": "text", "content": text_buffer}
             
             # Handle API-style tool calls (from tool_calls in response)
             if tool_calls and self.tool_executor and not xml_tool_calls:
@@ -946,6 +952,7 @@ FORBIDDEN:
                 ]
                 
                 logger.info(f"[CHAT] Making follow-up call with summary system prompt")
+                yield {"type": "thinking", "content": "Analyzing and formatting results..."}
                 response = self._call_api(follow_up_messages, stream=True, tools=None)
                 
                 full_response = ""
