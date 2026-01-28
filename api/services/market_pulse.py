@@ -13,7 +13,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
 import threading
 
-from api.config import OPENROUTER_API_KEY, OPENROUTER_BASE_URL, PULSE_MODEL
+# Removed AI config imports
 
 logger = logging.getLogger(__name__)
 

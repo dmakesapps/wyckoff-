@@ -4,7 +4,5 @@ from .stock_data import StockDataService
 from .indicators import IndicatorService
 from .options import OptionsService
 from .news import NewsService
-from .kimi import KimiService
 from .alpha import AlphaService
-from .chat import ChatService
-
+from .chart import ChartService
