@@ -451,7 +451,9 @@ async def scan_market(
                 sentiment="bullish" if technicals.overall_trend == "bullish" else "bearish" if technicals.overall_trend == "bearish" else "neutral",
                 brief=f"{technicals.overall_trend.title()} setup, {', '.join(signals)}",
             ))
-        except: continue
+        except Exception as e:
+            print(f"Error scanning {symbol}: {e}")
+            continue
 
     results.sort(key=lambda x: x.score, reverse=True)
     return results[:50]
