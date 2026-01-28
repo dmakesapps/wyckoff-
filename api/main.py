@@ -436,18 +436,21 @@ async def scan_market(
             if "unusual_volume" in request.strategies and technicals.volume.is_unusual:
                 signals.append("unusual_volume"); score += 2
             
-            if signals:
-                results.append(ScanResult(
-                    symbol=symbol,
-                    company_name=stock_service.get_company_name(symbol),
-                    price=quote.price,
-                    change_percent=quote.change_percent,
-                    volume=quote.volume,
-                    signals=signals,
-                    score=score,
-                    sentiment="bullish" if technicals.overall_trend == "bullish" else "neutral",
-                    brief=f"{technicals.overall_trend.title()} setup, {', '.join(signals)}",
-                ))
+            # Always include if symbol matched basic price/volume filters
+            if not signals:
+                signals.append("neutral_setup")
+                
+            results.append(ScanResult(
+                symbol=symbol,
+                company_name=stock_service.get_company_name(symbol),
+                price=quote.price,
+                change_percent=quote.change_percent,
+                volume=quote.volume,
+                signals=signals,
+                score=score,
+                sentiment="bullish" if technicals.overall_trend == "bullish" else "bearish" if technicals.overall_trend == "bearish" else "neutral",
+                brief=f"{technicals.overall_trend.title()} setup, {', '.join(signals)}",
+            ))
         except: continue
 
     results.sort(key=lambda x: x.score, reverse=True)
