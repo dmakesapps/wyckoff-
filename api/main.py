@@ -337,16 +337,32 @@ async def get_news(symbol: str, limit: int = Query(15, ge=1, le=50)):
 # MARKET SCAN
 # ═══════════════════════════════════════════════════════════════
 
-@app.post("/api/scan", response_model=list[ScanResult])
-async def scan_market(request: ScanRequest):
+@app.api_route("/api/scan", methods=["GET", "POST"], response_model=list[ScanResult])
+async def scan_market(
+    request: Optional[ScanRequest] = None,
+    symbols: Optional[str] = Query(None, description="Comma-separated symbols to scan"),
+    min_price: float = Query(5.0, description="Minimum price"),
+    max_price: float = Query(500.0, description="Maximum price"),
+    min_volume: int = Query(100000, description="Minimum volume"),
+):
     """
     Scan market for alpha opportunities
     
-    Runs multiple strategies and returns ranked results:
-    - Breakout: Stocks near ATH/ATL
-    - Momentum: Strong trend with volume
-    - Unusual Volume: Volume spikes
+    Supports both POST (with JSON body) and GET (with query parameters).
+    
+    If no symbols provided, scans a subset of tradeable symbols.
     """
+    # If it's a POST request, 'request' will be populated by FastAPI from the body.
+    # If it's a GET request, we build the request object from query parameters.
+    if request is None:
+        symbol_list = [s.strip().upper() for s in symbols.split(",")] if symbols else None
+        request = ScanRequest(
+            symbols=symbol_list,
+            min_price=min_price,
+            max_price=max_price,
+            min_volume=min_volume
+        )
+    
     # Get symbols to scan
     if request.symbols:
         symbols = request.symbols

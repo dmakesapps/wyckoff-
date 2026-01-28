@@ -21,6 +21,7 @@ This API provides high-performance, structured market data from Alpaca and Yahoo
     *   **Returns:** Score, label (e.g., "Extreme Fear"), and component breakdown.
 
 ### 3. Market Discovery (Scanners)
+*   **`GET/POST /api/scan`**: Flexible scanner for alpha opportunities. Supports filtering by price and volume.
 *   **`GET /api/market/gainers`**: Top % gainers.
 *   **`GET /api/market/losers`**: Top % losers.
 *   **`GET /api/market/unusual-volume`**: Stocks trading significantly higher volume than their 20-day average.
