@@ -113,8 +113,12 @@ class PriceLevels(BaseModel):
     pivot_point: Optional[float] = None
     ath: Optional[float] = None
     atl: Optional[float] = None
+    week_52_high: Optional[float] = None
+    week_52_low: Optional[float] = None
     distance_from_ath: Optional[float] = None  # percentage
     distance_from_atl: Optional[float] = None  # percentage
+    distance_from_52w_high: Optional[float] = None
+    distance_from_52w_low: Optional[float] = None
 
 
 class TechnicalIndicators(BaseModel):

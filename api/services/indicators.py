@@ -113,9 +113,9 @@ class IndicatorService:
             macd_signal=macd_signal_line,
             macd_histogram=macd_hist,
             macd_trend=macd_trend,
-            stochastic_k=stoch_k,
-            stochastic_d=stoch_d,
-            stochastic_signal=stoch_signal,
+            stoch_k=stoch_k,
+            stoch_d=stoch_d,
+            stoch_signal=stoch_signal,
         )
     
     def _calculate_volatility(
@@ -142,10 +142,10 @@ class IndicatorService:
         atr_percent = (atr / current_price * 100) if atr and current_price else None
         
         return VolatilityIndicators(
-            bb_upper=bb_upper,
-            bb_middle=bb_middle,
-            bb_lower=bb_lower,
-            bb_position=bb_position,
+            bollinger_upper=bb_upper,
+            bollinger_middle=bb_middle,
+            bollinger_lower=bb_lower,
+            price_position=bb_position,
             atr=atr,
             atr_percent=atr_percent,
         )
