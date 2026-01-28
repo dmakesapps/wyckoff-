@@ -363,35 +363,60 @@ async def scan_market(
             min_volume=min_volume
         )
     
-    # Get symbols to scan
-    if request.symbols:
-        symbols = request.symbols
-    else:
-        # Get all tradeable symbols (limited for speed)
-        all_symbols = stock_service.get_tradeable_symbols()
-        symbols = all_symbols[:100]  # Limit for API response time
+    # If no specific symbols provided, use the faster database-backed scanner
+    if not request.symbols:
+        db_results = scanner_db.search_stocks(
+            min_price=request.min_price,
+            max_price=request.max_price,
+            min_volume=request.min_volume,
+            limit=50
+        )
+        
+        # If DB has results, return them immediately
+        if db_results:
+            results = []
+            for r in db_results:
+                signals = []
+                score = 0
+                if r.get("is_unusual_volume"):
+                    signals.append("unusual_volume")
+                    score += 2
+                if r.get("is_near_high"):
+                    signals.append("near_ath")
+                    score += 3
+                    
+                change = r.get("change_percent", 0)
+                sentiment = "bullish" if change > 2 else "bearish" if change < -2 else "neutral"
+                
+                results.append(ScanResult(
+                    symbol=r["symbol"],
+                    company_name=r.get("company_name"),
+                    price=r["price"],
+                    change_percent=change,
+                    volume=r["volume"],
+                    signals=signals,
+                    score=score,
+                    sentiment=sentiment,
+                    brief=f"{sentiment.title()} move with {r.get('relative_volume', 1):.1f}x relative volume",
+                ))
+            return results
+
+    # Fallback to live scan for specific symbols (limit to 15 to avoid timeout)
+    symbols = request.symbols or []
+    if len(symbols) > 15:
+        symbols = symbols[:15]
     
     results = []
-    
     for symbol in symbols:
         try:
-            # Quick data fetch
+            # Live scan logic...
             quote = stock_service.get_quote(symbol)
-            if not quote:
-                continue
+            if not quote: continue
+            if quote.price < request.min_price or quote.price > request.max_price: continue
+            if quote.volume < request.min_volume: continue
             
-            # Apply price filter
-            if quote.price < request.min_price or quote.price > request.max_price:
-                continue
-            
-            # Apply volume filter
-            if quote.volume < request.min_volume:
-                continue
-            
-            # Get quick technicals
             history = stock_service.get_historical_data(symbol, period="3mo")
-            if not history:
-                continue
+            if not history: continue
             
             technicals = indicator_service.calculate_all(
                 closes=history["closes"],
@@ -401,41 +426,17 @@ async def scan_market(
                 current_price=quote.price,
             )
             
-            # Check strategies
             signals = []
             score = 0
-            
-            # Breakout strategy
             if "breakout" in request.strategies:
-                if technicals.price_levels.distance_from_ath:
-                    if technicals.price_levels.distance_from_ath > -5:
-                        signals.append("near_ath")
-                        score += 3
-                if technicals.price_levels.distance_from_atl:
-                    if technicals.price_levels.distance_from_atl < 10:
-                        signals.append("near_atl")
-                        score += 2
+                if technicals.price_levels.distance_from_ath and technicals.price_levels.distance_from_ath > -5:
+                    signals.append("near_ath"); score += 3
+            if "momentum" in request.strategies and technicals.overall_trend == "bullish":
+                signals.append("bullish_trend"); score += 2
+            if "unusual_volume" in request.strategies and technicals.volume.is_unusual:
+                signals.append("unusual_volume"); score += 2
             
-            # Momentum strategy
-            if "momentum" in request.strategies:
-                if technicals.overall_trend == "bullish":
-                    signals.append("bullish_trend")
-                    score += 2
-                if technicals.momentum.macd_trend == "bullish":
-                    signals.append("macd_bullish")
-                    score += 1
-            
-            # Unusual volume strategy
-            if "unusual_volume" in request.strategies:
-                if technicals.volume.is_unusual:
-                    signals.append("unusual_volume")
-                    score += 2
-            
-            # Only include if has signals
             if signals:
-                sentiment = "bullish" if technicals.overall_trend == "bullish" else \
-                           "bearish" if technicals.overall_trend == "bearish" else "neutral"
-                
                 results.append(ScanResult(
                     symbol=symbol,
                     company_name=stock_service.get_company_name(symbol),
@@ -444,17 +445,13 @@ async def scan_market(
                     volume=quote.volume,
                     signals=signals,
                     score=score,
-                    sentiment=sentiment,
-                    brief=f"{technicals.overall_trend.title() if technicals.overall_trend else 'Mixed'} setup, {', '.join(signals)}",
+                    sentiment="bullish" if technicals.overall_trend == "bullish" else "neutral",
+                    brief=f"{technicals.overall_trend.title()} setup, {', '.join(signals)}",
                 ))
-                
-        except Exception as e:
-            continue
-    
-    # Sort by score
+        except: continue
+
     results.sort(key=lambda x: x.score, reverse=True)
-    
-    return results[:50]  # Top 50
+    return results[:50]
 
 
 # ═══════════════════════════════════════════════════════════════
