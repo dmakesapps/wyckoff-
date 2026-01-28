@@ -112,57 +112,7 @@ class NewsService:
             print(f"Error fetching news for {symbol}: {e}")
             return None
     
-    def get_news_for_ai(self, symbol: str) -> dict:
-        """
-        Get news formatted for AI analysis with source citations
-        
-        Returns structured data that Kimi can use to provide sourced analysis
-        """
-        news = self.get_news(symbol, limit=15)
-        
-        if not news or not news.articles:
-            return {
-                "has_news": False,
-                "articles": [],
-                "sources": [],
-                "summary": "No recent news available",
-            }
-        
-        # Format articles with citation numbers
-        formatted_articles = []
-        sources = []
-        
-        for i, article in enumerate(news.articles):
-            citation_num = i + 1
-            
-            # Calculate time ago
-            time_ago = self._format_time_ago(article.published_at)
-            
-            formatted_articles.append({
-                "citation": citation_num,
-                "title": article.title,
-                "source": article.source,
-                "url": article.url,
-                "time_ago": time_ago,
-                "sentiment": article.sentiment,
-            })
-            
-            sources.append({
-                "num": citation_num,
-                "source": article.source,
-                "url": article.url,
-                "title": article.title[:80] + "..." if len(article.title) > 80 else article.title,
-            })
-        
-        return {
-            "has_news": True,
-            "articles": formatted_articles,
-            "sources": sources,
-            "overall_sentiment": news.overall_sentiment,
-            "catalysts": news.key_catalysts,
-            "earnings_date": news.earnings_date,
-            "summary": f"{len(formatted_articles)} articles from {len(set(a['source'] for a in formatted_articles))} sources",
-        }
+    # Removed AI news formatting logic
     
     def _format_time_ago(self, dt: datetime) -> str:
         """Format datetime as 'X hours ago' or 'X days ago'"""

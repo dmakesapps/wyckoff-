@@ -18,7 +18,7 @@ load_dotenv(env_path)
 
 API_TITLE = "Alpha Discovery API"
 API_VERSION = "1.0.0"
-API_DESCRIPTION = "AI-powered stock analysis for finding alpha"
+API_DESCRIPTION = "High-performance stock data API powered by Alpaca and Yahoo Finance"
 
 # CORS - allow your React frontend
 CORS_ORIGINS = [
@@ -37,21 +37,6 @@ ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "PKIYO5HV7CWXVXULBJGUG7BF34")
 ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "3c5V13t1pBziN6PUcRmCMBxw4t65S3HtrRiSi6yNpGVa")
 ALPACA_BASE_URL = "https://paper-api.alpaca.markets"
 ALPACA_DATA_URL = "https://data.alpaca.markets"
-
-# ═══════════════════════════════════════════════════════════════
-# KIMI AI SETTINGS (via OpenRouter)
-# ═══════════════════════════════════════════════════════════════
-
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # Set in .env file
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-KIMI_MODEL = "moonshotai/kimi-k2-thinking"
-SCOUT_MODEL = "minimax/minimax-m2.1"
-PULSE_MODEL = "minimax/minimax-m2.1"
-STRATEGIST_MODEL = "moonshotai/kimi-k2-thinking"
-
-# Optional: Your app name for OpenRouter rankings
-OPENROUTER_APP_NAME = "Alpha Discovery"
-OPENROUTER_APP_URL = "http://localhost:5173"  # Your React app URL
 
 # ═══════════════════════════════════════════════════════════════
 # TECHNICAL INDICATOR SETTINGS

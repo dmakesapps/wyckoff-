@@ -22,9 +22,7 @@ from api.services.stock_data import StockDataService
 from api.services.indicators import IndicatorService
 from api.services.options import OptionsService
 from api.services.news import NewsService
-from api.services.kimi import KimiService
 from api.services.alpha import AlphaService
-from api.services.chat import ChatService
 from api.services.chart import ChartService
 from api.services.market_pulse import market_pulse_service
 
@@ -57,7 +55,6 @@ stock_service = StockDataService()
 indicator_service = IndicatorService()
 options_service = OptionsService()
 news_service = NewsService()
-kimi_service = KimiService()
 alpha_service = AlphaService()
 chart_service = ChartService()
 
@@ -75,464 +72,8 @@ _headlines_cache = {
 }
 
 
-# ═══════════════════════════════════════════════════════════════
-# TOOL EXECUTOR FOR CHAT
-# ═══════════════════════════════════════════════════════════════
-
-def execute_tool(tool_name: str, arguments: dict) -> dict:
-    """Execute a tool and return results for Kimi to use"""
-    
-    try:
-        if tool_name == "get_stock_analysis":
-            symbol = arguments.get("symbol", "").upper()
-            quote = stock_service.get_quote(symbol)
-            if not quote:
-                return {"error": f"Symbol {symbol} not found"}
-            
-            history = stock_service.get_historical_data(symbol, period="1y")
-            if not history:
-                return {"error": f"No historical data for {symbol}"}
-            
-            technicals = indicator_service.calculate_all(
-                closes=history["closes"],
-                highs=history["highs"],
-                lows=history["lows"],
-                volumes=[int(v) for v in history["volumes"]],
-                current_price=quote.price,
-            )
-            
-            volume_metrics = alpha_service.calculate_volume_metrics(
-                volumes=[int(v) for v in history["volumes"]],
-                closes=history["closes"],
-                current_price=quote.price,
-                current_volume=quote.volume,
-            )
-            
-            options = None
-            if arguments.get("include_options", True):
-                options = options_service.get_options_data(symbol)
-            
-            news = None
-            if arguments.get("include_news", True):
-                news = news_service.get_news(symbol)
-            
-            alpha_score = alpha_service.calculate_alpha_score(
-                quote=quote,
-                technicals=technicals,
-                volume_metrics=volume_metrics,
-                options=options,
-                news=news,
-            )
-            
-            return {
-                "symbol": symbol,
-                "company_name": stock_service.get_company_name(symbol),
-                "price": quote.price,
-                "change_percent": quote.change_percent,
-                "volume": quote.volume,
-                "alpha_score": alpha_score.get("total_score"),
-                "alpha_grade": alpha_score.get("overall_grade"),
-                "trend": technicals.overall_trend,
-                "rsi": technicals.momentum.rsi,
-                "macd_trend": technicals.momentum.macd_trend,
-                "volume_metrics": volume_metrics,
-                "signals": alpha_score.get("signals", [])[:5],
-                "options_summary": {
-                    "put_call_ratio": options.put_call_ratio if options else None,
-                    "unusual_activity": len(options.unusual_activity) if options else 0,
-                } if options else None,
-                "news_summary": {
-                    "sentiment": news.overall_sentiment if news else None,
-                    "article_count": len(news.articles) if news else 0,
-                    "catalysts": news.key_catalysts if news else [],
-                    "headlines": [a.title for a in news.articles[:3]] if news else [],
-                } if news else None,
-            }
-        
-        elif tool_name == "get_stock_quote":
-            symbol = arguments.get("symbol", "").upper()
-            quote = stock_service.get_quote(symbol)
-            if not quote:
-                return {"error": f"Symbol {symbol} not found"}
-            return {
-                "symbol": symbol,
-                "price": quote.price,
-                "change": quote.change,
-                "change_percent": quote.change_percent,
-                "volume": quote.volume,
-                "high": quote.high,
-                "low": quote.low,
-            }
-        
-        elif tool_name == "get_price_history":
-            symbol = arguments.get("symbol", "").upper()
-            period = arguments.get("period", "1mo").lower()
-            if period == '1w': period = '5d' 
-            
-            # Use stock service logic
-            history = stock_service.get_historical_data(symbol, period=period)
-            if not history:
-                return {"error": f"No history found for {symbol}"}
-                
-            dates = history.get("dates", [])
-            closes = history.get("closes", [])
-            volumes = history.get("volumes", [])
-            
-            data_points = []
-            # Return last 15 points max to avoid blowing context
-            limit = 20
-            start_idx = max(0, len(dates) - limit)
-            
-            for i in range(start_idx, len(dates)):
-                data_points.append({
-                    "date": dates[i],
-                    "close": round(closes[i], 2),
-                    "volume": int(volumes[i])
-                })
-            
-            avg_vol = sum(volumes) / len(volumes) if volumes else 0
-            
-            return {
-                "symbol": symbol,
-                "period": period,
-                "data_points": data_points,
-                "average_volume": int(avg_vol),
-                "summary": f"Retrieved history for {symbol}"
-            }
-        
-        elif tool_name == "get_stock_news":
-            symbol = arguments.get("symbol", "").upper()
-            limit = arguments.get("limit", 10)
-            news = news_service.get_news(symbol, limit=limit)
-            if not news:
-                return {"error": f"No news found for {symbol}"}
-            return {
-                "symbol": symbol,
-                "overall_sentiment": news.overall_sentiment,
-                "catalysts": news.key_catalysts,
-                "earnings_date": news.earnings_date,
-                "articles": [
-                    {
-                        "citation": i + 1,
-                        "title": a.title,
-                        "source": a.source,
-                        "url": a.url,
-                        "sentiment": a.sentiment,
-                    }
-                    for i, a in enumerate(news.articles)
-                ],
-            }
-        
-        elif tool_name == "get_insider_transactions":
-            symbol = arguments.get("symbol", "").upper()
-            insiders = stock_service.get_insider_transactions(symbol)
-            holders = stock_service.get_institutional_holders(symbol)
-            
-            return {
-                "symbol": symbol,
-                "insider_summary": insiders.get("summary") if insiders else "No data available",
-                "recent_insider_trades": insiders.get("transactions")[:10] if insiders and insiders.get("transactions") else [],
-                "institutional_ownership": holders.get("major_holders_summary") if holders else {},
-                "top_institutional_holders": holders.get("top_holders")[:10] if holders and holders.get("top_holders") else [],
-                "total_holders": holders.get("total_holders_count") if holders else 0
-            }
-        
-        elif tool_name == "get_options_flow":
-            symbol = arguments.get("symbol", "").upper()
-            options = options_service.get_options_data(symbol)
-            if not options:
-                return {"error": f"No options data for {symbol}"}
-            sentiment = options_service.analyze_sentiment(options)
-            return {
-                "symbol": symbol,
-                "put_call_ratio": options.put_call_ratio,
-                "total_call_volume": options.total_call_volume,
-                "total_put_volume": options.total_put_volume,
-                "max_pain": options.max_pain,
-                "sentiment": sentiment,
-                "unusual_activity": options.unusual_activity[:5],
-            }
-        
-        elif tool_name == "get_market_news":
-            # General market news - use SPY as proxy
-            news = news_service.get_news("SPY", limit=10)
-            if not news:
-                return {"articles": [], "sentiment": "neutral"}
-            return {
-                "overall_sentiment": news.overall_sentiment,
-                "articles": [
-                    {
-                        "citation": i + 1,
-                        "title": a.title,
-                        "source": a.source,
-                        "sentiment": a.sentiment,
-                    }
-                    for i, a in enumerate(news.articles)
-                ],
-            }
-        
-        # ═══════════════════════════════════════════════════════════════
-        # SCANNER TOOLS
-        # ═══════════════════════════════════════════════════════════════
-        
-        elif tool_name == "scan_unusual_volume":
-            min_rvol = arguments.get("min_rvol", 2.0)
-            market_cap = arguments.get("market_cap_category")
-            limit = arguments.get("limit", 20)
-            
-            results = scanner_db.get_unusual_volume(
-                min_rvol=min_rvol,
-                limit=limit,
-                market_cap_category=market_cap
-            )
-            
-            # Build formatted markdown for display to save LLM tokens
-            table = "| Ticker | Price | Change | RVOL | Sector |\n"
-            table += "|:---|:---|:---|:---|:---|\n"
-            for r in results[:15]:
-                change_str = f"{r['change_percent']:+.1f}%"
-                table += f"| **{r['symbol']}** | ${r['price']:.2f} | {change_str} | {r['relative_volume']:.1f}x | {r['sector'] or 'N/A'} |\n"
-            
-            return {
-                "count": len(results),
-                "filter": f"RVOL >= {min_rvol}x" + (f", {market_cap} cap" if market_cap else ""),
-                "formatted_markdown": table,
-                "stocks": [
-                    {
-                        "symbol": r["symbol"],
-                        "company": r["company_name"],
-                        "price": r["price"],
-                        "change_pct": r["change_percent"],
-                        "volume": r["volume"],
-                        "rvol": r["relative_volume"],
-                        "market_cap": r["market_cap_category"],
-                    }
-                    for r in results
-                ]
-            }
-        
-        elif tool_name == "scan_top_movers":
-            direction = arguments.get("direction", "gainers")
-            market_cap = arguments.get("market_cap_category")
-            limit = arguments.get("limit", 20)
-            
-            if direction == "gainers":
-                results = scanner_db.get_top_gainers(limit=limit, market_cap_category=market_cap)
-            else:
-                results = scanner_db.get_top_losers(limit=limit, market_cap_category=market_cap)
-            
-            # Build formatted markdown
-            table = f"| Ticker | Price | Change | RVOL | Sector |\n"
-            table += "|:---|:---|:---|:---|:---|\n"
-            for r in results[:15]:
-                change_str = f"{r['change_percent']:+.1f}%"
-                table += f"| **{r['symbol']}** | ${r['price']:.2f} | {change_str} | {r['relative_volume']:.1f}x | {r['sector'] or 'N/A'} |\n"
-
-            return {
-                "count": len(results),
-                "type": direction,
-                "filter": f"{market_cap} cap" if market_cap else "all",
-                "formatted_markdown": table,
-                "stocks": [
-                    {
-                        "symbol": r["symbol"],
-                        "company": r["company_name"],
-                        "price": r["price"],
-                        "change_pct": r["change_percent"],
-                        "volume": r["volume"],
-                        "rvol": r["relative_volume"],
-                    }
-                    for r in results
-                ]
-            }
-        
-        elif tool_name == "scan_breakout_candidates":
-            scan_type = arguments.get("type", "near_high")
-            market_cap = arguments.get("market_cap_category")
-            limit = arguments.get("limit", 20)
-            
-            if scan_type == "near_high":
-                results = scanner_db.get_near_52w_high(limit=limit, market_cap_category=market_cap)
-            else:
-                results = scanner_db.get_near_52w_low(limit=limit, market_cap_category=market_cap)
-            
-            # Build formatted markdown
-            title = "Near 52W High" if scan_type == "near_high" else "Near 52W Low"
-            table = f"| Ticker | Price | Change | Dist. High | RVOL |\n"
-            table += "|:---|:---|:---|:---|:---|\n"
-            for r in results[:15]:
-                change_str = f"{r['change_percent']:+.1f}%"
-                dist_str = f"{r['distance_from_52w_high']:.1f}%" if r['distance_from_52w_high'] else "N/A"
-                table += f"| **{r['symbol']}** | ${r['price']:.2f} | {change_str} | {dist_str} | {r['relative_volume']:.1f}x |\n"
-
-            return {
-                "count": len(results),
-                "type": scan_type,
-                "formatted_markdown": table,
-                "stocks": [
-                    {
-                        "symbol": r["symbol"],
-                        "company": r["company_name"],
-                        "price": r["price"],
-                        "change_pct": r["change_percent"],
-                        "distance_52w_high": r["distance_from_52w_high"],
-                        "distance_52w_low": r["distance_from_52w_low"],
-                        "rvol": r["relative_volume"],
-                    }
-                    for r in results
-                ]
-            }
-        
-        elif tool_name == "scan_by_sector":
-            sector = arguments.get("sector", "Technology")
-            sort_by = arguments.get("sort_by", "change_percent")
-            limit = arguments.get("limit", 20)
-            
-            results = scanner_db.get_by_sector(sector=sector, sort_by=sort_by, limit=limit)
-            
-            # Build formatted markdown
-            table = f"| Ticker | Price | Change | Vol | RVOL |\n"
-            table += "|:---|:---|:---|:---|:---|\n"
-            for r in results[:15]:
-                change_str = f"{r['change_percent']:+.1f}%"
-                vol_str = f"{r['volume']/1000000:.1f}M" if r['volume'] > 1000000 else f"{r['volume']/1000:.1f}K"
-                table += f"| **{r['symbol']}** | ${r['price']:.2f} | {change_str} | {vol_str} | {r['relative_volume']:.1f}x |\n"
-
-            return {
-                "sector": sector,
-                "count": len(results),
-                "sorted_by": sort_by,
-                "formatted_markdown": table,
-                "stocks": [
-                    {
-                        "symbol": r["symbol"],
-                        "company": r["company_name"],
-                        "price": r["price"],
-                        "change_pct": r["change_percent"],
-                        "volume": r["volume"],
-                        "rvol": r["relative_volume"],
-                    }
-                    for r in results
-                ]
-            }
-        
-        elif tool_name == "search_market":
-            market_cap_filter = arguments.get("market_cap_category")
-            sector_filter = arguments.get("sector")
-            limit = arguments.get("limit", 50)
-            
-            # If filtering by market_cap or sector, we need Yahoo data
-            needs_yahoo = market_cap_filter is not None or sector_filter is not None
-            
-            # First get results from DB (fast Alpaca data)
-            results = scanner_db.search_stocks(
-                min_price=arguments.get("min_price"),
-                max_price=arguments.get("max_price"),
-                min_volume=arguments.get("min_volume"),
-                min_rvol=arguments.get("min_rvol"),
-                max_rvol=arguments.get("max_rvol"),
-                min_change=arguments.get("min_change"),
-                max_change=arguments.get("max_change"),
-                market_cap_category=None,  # Don't filter by market cap from DB (we'll use Yahoo)
-                sector=None,  # Don't filter by sector from DB
-                limit=50 if needs_yahoo else limit  # Get enough to filter but not too many
-            )
-            
-            if needs_yahoo and results:
-                # Enrich with Yahoo data (only the first few to keep it snappy)
-                symbols_to_enrich = [r["symbol"] for r in results[:20]]
-                scheduler = get_scheduler()
-                yahoo_data = scheduler.scanner.enrich_with_yahoo(symbols_to_enrich)
-                
-                # Check if Yahoo data was successful
-                yahoo_success = sum(1 for v in yahoo_data.values() if v.get("market_cap"))
-                
-                if yahoo_success > 0:
-                    # Filter by market cap and/or sector
-                    filtered = []
-                    for r in results:
-                        symbol = r["symbol"]
-                        if symbol in yahoo_data:
-                            yf_data = yahoo_data[symbol]
-                            # Apply market cap filter
-                            if market_cap_filter and yf_data.get("market_cap_category") != market_cap_filter:
-                                continue
-                            # Apply sector filter  
-                            if sector_filter and yf_data.get("sector") != sector_filter:
-                                continue
-                            # Update result with Yahoo data
-                            r["market_cap"] = yf_data.get("market_cap")
-                            r["market_cap_category"] = yf_data.get("market_cap_category")
-                            r["sector"] = yf_data.get("sector")
-                            r["industry"] = yf_data.get("industry")
-                            filtered.append(r)
-                            
-                            if len(filtered) >= limit:
-                                break
-                    
-                    results = filtered
-                else:
-                    # Yahoo rate limited - return results without market cap filter
-                    # but notify in the response
-                    results = results[:limit]
-                    for r in results:
-                        r["market_cap_category"] = "unknown (Yahoo rate limited)"
-            else:
-                results = results[:limit]
-            
-            return {
-                "count": len(results),
-                "filters": {k: v for k, v in arguments.items() if v is not None},
-                "note": "Yahoo Finance rate limited - market cap filter skipped" if needs_yahoo and len(results) > 0 and results[0].get("market_cap_category", "").startswith("unknown") else None,
-                "stocks": [
-                    {
-                        "symbol": r["symbol"],
-                        "company": r.get("company_name"),
-                        "price": r["price"],
-                        "change_percent": r["change_percent"],
-                        "volume": r["volume"],
-                        "relative_volume": r["relative_volume"],
-                        "sector": r.get("sector"),
-                        "market_cap": r.get("market_cap"),
-                        "market_cap_category": r.get("market_cap_category", "unknown"),
-                    }
-                    for r in results
-                ]
-            }
-        
-        elif tool_name == "get_market_overview":
-            stats = scanner_db.get_summary_stats()
-            
-            # Get some examples
-            unusual_vol = scanner_db.get_unusual_volume(limit=5)
-            top_gainers = scanner_db.get_top_gainers(limit=5)
-            top_losers = scanner_db.get_top_losers(limit=5)
-            
-            return {
-                "summary": stats,
-                "top_unusual_volume": [
-                    {"symbol": s["symbol"], "rvol": s["relative_volume"], "change": s["change_percent"]}
-                    for s in unusual_vol
-                ],
-                "top_gainers": [
-                    {"symbol": s["symbol"], "change": s["change_percent"]}
-                    for s in top_gainers
-                ],
-                "top_losers": [
-                    {"symbol": s["symbol"], "change": s["change_percent"]}
-                    for s in top_losers
-                ],
-            }
-        
-        else:
-            return {"error": f"Unknown tool: {tool_name}"}
-            
-    except Exception as e:
-        return {"error": str(e)}
-
-
-# Initialize chat service with tool executor
-chat_service = ChatService(tool_executor=execute_tool)
+# AI Tool Execution logic removed (was for Kimi)
+# AI Tool Execution and Chat Logic removed.
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -587,42 +128,13 @@ async def health_check():
 
 IDEAS_FILE = os.path.join(os.path.dirname(__file__), "../agentic_layer/knowledge_base/ideas.json")
 
-@app.get("/api/ideas")
-async def get_ideas():
-    """Get ideas generated by the Strategist (Kimi)"""
-    if not os.path.exists(IDEAS_FILE):
-        return []
-    
-    try:
-        with open(IDEAS_FILE, 'r') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error reading ideas: {e}")
-        return []
+# AI Ideas endpoint removed
 
-from agentic_layer.dual_agent import DualAgentSystem
-intelligence_system = DualAgentSystem()
+# Removed intelligence system as it depends on LLM agent logic
 
-@app.post("/api/intelligence/scan")
-async def run_intelligence_scan(
-    payload: dict = Body(...)
-):
-    """Run a one-off intelligence scan for a ticker"""
-    symbol = payload.get("symbol", "").upper()
-    if not symbol:
-        raise HTTPException(status_code=400, detail="Symbol is required")
-    
-    result = await intelligence_system.run_scan(symbol)
-    return result
+# Removed intelligence endpoints
 
-@app.get("/api/bot/status")
-async def get_bot_status():
-    """Check if the dual-agent bot is running"""
-    # Simple check for the process
-    import subprocess
-    cmd = "ps aux | grep dual_agent.py | grep -v grep"
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    return {"online": len(result.stdout) > 0}
+# Removed bot status endpoint
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -702,18 +214,6 @@ async def analyze_stock(
         fundamentals=fundamentals,
     )
     
-    # Generate AI analysis
-    ai_analysis = None
-    if include_ai:
-        ai_analysis = kimi_service.analyze(
-            symbol=symbol,
-            quote=quote,
-            technicals=technicals,
-            options=options,
-            news=news,
-            fundamentals=fundamentals,
-        )
-    
     return {
         "symbol": symbol,
         "company_name": company_name,
@@ -724,7 +224,6 @@ async def analyze_stock(
         "options": options,
         "news": news,
         "fundamentals": fundamentals,
-        "ai_analysis": ai_analysis,
         "analyzed_at": datetime.now(timezone.utc),
     }
 
@@ -831,21 +330,7 @@ async def get_news(symbol: str, limit: int = Query(15, ge=1, le=50)):
     }
 
 
-@app.get("/api/news/{symbol}/for-ai")
-async def get_news_for_ai(symbol: str):
-    """
-    Get news formatted for AI analysis with citation numbers
-    
-    This endpoint returns news in a format optimized for LLM consumption
-    with citation numbers that can be referenced in AI responses.
-    """
-    symbol = symbol.upper().strip()
-    
-    news_data = news_service.get_news_for_ai(symbol)
-    return {
-        "symbol": symbol,
-        **news_data,
-    }
+# Removed news for ai endpoint
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -960,50 +445,7 @@ async def scan_market(request: ScanRequest):
 # CHAT ENDPOINT (Streaming)
 # ═══════════════════════════════════════════════════════════════
 
-@app.post("/api/chat")
-async def chat(request: Request):
-    """
-    Chat endpoint with streaming and tool calling
-    
-    Input:
-    {
-        "messages": [
-            {"role": "user", "content": "Why is NVDA up today?"}
-        ],
-        "stream": true  // optional, default true
-    }
-    
-    Output (SSE stream):
-    data: {"type": "text", "content": "NVDA is up..."}
-    data: {"type": "tool_call", "name": "get_stock_analysis", "arguments": {...}}
-    data: {"type": "tool_result", "name": "...", "result": {...}}
-    data: {"type": "done", "content": "full response"}
-    """
-    body = await request.json()
-    messages = body.get("messages", [])
-    stream = body.get("stream", True)
-    
-    if not messages:
-        raise HTTPException(status_code=400, detail="No messages provided")
-    
-    if stream:
-        async def generate():
-            for chunk in chat_service.chat_stream(messages):
-                # Use default=str to handle non-serializable objects like Timestamps
-                yield f"data: {json.dumps(chunk, default=str)}\n\n"
-        
-        return StreamingResponse(
-            generate(),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            }
-        )
-    else:
-        # Non-streaming response
-        result = chat_service.chat_sync(messages)
-        return result
+# Removed chat endpoint
 
 
 # ═══════════════════════════════════════════════════════════════
