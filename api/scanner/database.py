@@ -852,7 +852,7 @@ class ScannerDB:
         # Parse sector data from JSON
         try:
             sector_data = json.loads(r.get("sector_data", "[]"))
-        except:
+        except json.JSONDecodeError:
             sector_data = []
         
         total = r["advancing"] + r["declining"] + r["unchanged"]

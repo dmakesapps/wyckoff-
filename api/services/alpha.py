@@ -519,8 +519,9 @@ class AlphaService:
         vol = technicals.volatility
         
         # Bollinger Band squeeze (low volatility = potential breakout)
-        if vol.bb_upper and vol.bb_lower and vol.bb_middle:
-            bb_width = (vol.bb_upper - vol.bb_lower) / vol.bb_middle
+
+        if vol.bollinger_upper and vol.bollinger_lower and vol.bollinger_middle:
+            bb_width = (vol.bollinger_upper - vol.bollinger_lower) / vol.bollinger_middle
             if bb_width < 0.1:  # Tight bands
                 signals.append({
                     "name": "Bollinger Squeeze",
@@ -532,7 +533,8 @@ class AlphaService:
                 bullish_points += 3
         
         # Price at Bollinger extremes
-        if vol.bb_position == "below_lower":
+
+        if vol.price_position == "below_lower":
             signals.append({
                 "name": "Below Lower BB",
                 "type": "bullish",
@@ -540,7 +542,7 @@ class AlphaService:
                 "description": "Price below lower Bollinger Band - oversold"
             })
             bullish_points += 8
-        elif vol.bb_position == "above_upper":
+        elif vol.price_position == "above_upper":
             signals.append({
                 "name": "Above Upper BB",
                 "type": "bearish",
@@ -825,7 +827,8 @@ class AlphaService:
             score += 1
         elif mom.rsi and 50 <= mom.rsi <= 70:
             score += 2
-        if mom.stochastic_signal == "neutral":
+
+        if mom.stoch_signal == "neutral":
             score += 1
         
         if score >= 4:
@@ -870,9 +873,10 @@ class AlphaService:
         levels = technicals.price_levels
         
         # Good entry near support
-        if vol.bb_position == "below_lower":
+
+        if vol.price_position == "below_lower":
             score += 2
-        elif vol.bb_position == "within":
+        elif vol.price_position == "within":
             score += 1
         
         # Not extended

@@ -520,6 +520,8 @@ Output ONLY valid JSON array, no markdown, no explanation:
         }
 
 
-# Singleton instance - cache for 1 hour to minimize API costs
-market_pulse_service = MarketPulseService(cache_minutes=60)
+# ✅ FIXED: Reduced cache from 60 to 15 minutes
+# 60 minutes is too stale for "what's happening today" - users need timely updates
+# 15 minutes balances API costs with freshness
+market_pulse_service = MarketPulseService(cache_minutes=15)
 

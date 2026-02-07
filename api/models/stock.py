@@ -33,6 +33,7 @@ class Fundamentals(BaseModel):
     market_cap: Optional[float] = None
     market_cap_formatted: Optional[str] = None
     pe_ratio: Optional[float] = None
+    forward_pe: Optional[float] = None
     eps: Optional[float] = None
     dividend_yield: Optional[float] = None
     beta: Optional[float] = None
@@ -40,6 +41,8 @@ class Fundamentals(BaseModel):
     week_52_low: Optional[float] = None
     avg_volume: Optional[int] = None
     shares_outstanding: Optional[int] = None
+    float_shares: Optional[int] = None
+    short_percent: Optional[float] = None
     sector: Optional[str] = None
     industry: Optional[str] = None
 
@@ -115,6 +118,11 @@ class PriceLevels(BaseModel):
     atl: Optional[float] = None
     distance_from_ath: Optional[float] = None  # percentage
     distance_from_atl: Optional[float] = None  # percentage
+
+    week_52_high: Optional[float] = None
+    week_52_low: Optional[float] = None
+    distance_from_52w_high: Optional[float] = None  # percentage (negative when below high)
+    distance_from_52w_low: Optional[float] = None   # percentage (positive when above low)
 
 
 class TechnicalIndicators(BaseModel):

@@ -129,23 +129,32 @@ class IndicatorService:
         
         bb_upper, bb_middle, bb_lower = self._bollinger_bands(closes)
         
-        bb_position = None
+
+        price_position = None
         if bb_upper and bb_lower:
             if current_price > bb_upper:
-                bb_position = "above_upper"
+                price_position = "above_upper"
             elif current_price < bb_lower:
-                bb_position = "below_lower"
+                price_position = "below_lower"
             else:
-                bb_position = "within"
+                price_position = "within"
         
         atr = self._atr(closes, highs, lows)
         atr_percent = (atr / current_price * 100) if atr and current_price else None
         
+        # Calculate Bollinger Band width (volatility measure)
+        bollinger_width = None
+        if bb_upper and bb_lower and bb_middle and bb_middle > 0:
+            bollinger_width = round((bb_upper - bb_lower) / bb_middle, 4)
+        
+
+        # Model expects: bollinger_upper, bollinger_middle, bollinger_lower, bollinger_width, price_position
         return VolatilityIndicators(
-            bb_upper=bb_upper,
-            bb_middle=bb_middle,
-            bb_lower=bb_lower,
-            bb_position=bb_position,
+            bollinger_upper=bb_upper,
+            bollinger_middle=bb_middle,
+            bollinger_lower=bb_lower,
+            bollinger_width=bollinger_width,
+            price_position=price_position,
             atr=atr,
             atr_percent=atr_percent,
         )

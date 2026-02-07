@@ -528,7 +528,8 @@ class ChatService:
                         stocks = json.loads(stocks_match.group(1))
                         embedded_data = {"stocks": stocks}
                         logger.info(f"[CHAT] Extracted {len(stocks)} stocks from partial JSON")
-                    except:
+                    except Exception as parse_err:
+                        logger.debug(f"Failed to parse stocks from Kimi token JSON: {parse_err}")
                         pass
             
             # Remove the Kimi token format from text

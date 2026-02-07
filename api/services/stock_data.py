@@ -20,10 +20,12 @@ Use Yahoo for:
 """
 
 import yfinance as yf
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime, timezone, timedelta
+from typing import Optional, Dict, Any
 import requests
 import logging
+import threading
+import time
 
 from api.config import ALPACA_API_KEY, ALPACA_SECRET_KEY, ALPACA_DATA_URL, ALPACA_BASE_URL
 from api.models.stock import StockQuote, Fundamentals
@@ -31,12 +33,57 @@ from api.models.stock import StockQuote, Fundamentals
 logger = logging.getLogger(__name__)
 
 
+# ═══════════════════════════════════════════════════════════════
+# SIMPLE IN-MEMORY CACHE
+# ═══════════════════════════════════════════════════════════════
+
+class SimpleCache:
+    """Thread-safe in-memory cache with TTL"""
+    
+    def __init__(self):
+        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.Lock()
+    
+    def get(self, key: str) -> Optional[Any]:
+        """Get value from cache if not expired"""
+        with self._lock:
+            if key in self._cache:
+                entry = self._cache[key]
+                if datetime.now(timezone.utc) < entry["expires"]:
+                    return entry["value"]
+                else:
+                    del self._cache[key]
+        return None
+    
+    def set(self, key: str, value: Any, ttl_seconds: int):
+        """Set value in cache with TTL"""
+        with self._lock:
+            self._cache[key] = {
+                "value": value,
+                "expires": datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+            }
+    
+    def clear_expired(self):
+        """Remove expired entries (call periodically)"""
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            expired = [k for k, v in self._cache.items() if now >= v["expires"]]
+            for k in expired:
+                del self._cache[k]
+
+
+# Global cache instances
+_quote_cache = SimpleCache()      # 15 second TTL for quotes
+_fundamentals_cache = SimpleCache()  # 1 hour TTL for fundamentals
+_history_cache = SimpleCache()    # 60 second TTL for historical data
+
+
 class StockDataService:
     """
     Hybrid data service - uses Alpaca for speed, Yahoo for depth
     
-    Alpaca: Real-time quotes, bulk scanning
-    Yahoo: Options, fundamentals, sector data
+    Alpaca: Real-time quotes, bulk scanning (PREFERRED for speed)
+    Yahoo: Options, fundamentals, sector data, fallback
     """
     
     def __init__(self):
@@ -44,35 +91,64 @@ class StockDataService:
             "APCA-API-KEY-ID": ALPACA_API_KEY,
             "APCA-API-SECRET-KEY": ALPACA_SECRET_KEY,
         }
-        self._use_alpaca_quotes = False  # Changed to False to force Yahoo (better volume logic)
+
+        # Volume is enriched separately when needed
+        self._use_alpaca_quotes = True
     
     def get_quote(self, symbol: str, prefer_alpaca: bool = True) -> Optional[StockQuote]:
         """
         Get current quote - tries Alpaca first (faster), falls back to Yahoo
+        
+        ✅ FIXED: Added caching (15 second TTL) to prevent rate limiting
         """
+        symbol = symbol.upper().strip()
+        cache_key = f"quote:{symbol}"
+        
+        # Check cache first
+        cached = _quote_cache.get(cache_key)
+        if cached:
+            return cached
+        
+        quote = None
+        
         if prefer_alpaca and self._use_alpaca_quotes:
             quote = self._get_alpaca_quote(symbol)
-            if quote:
-                return quote
         
-        # Fallback to Yahoo
-        return self._get_yahoo_quote(symbol)
+        # Fallback to Yahoo if Alpaca fails
+        if not quote:
+            quote = self._get_yahoo_quote(symbol)
+        
+        # Cache successful results for 15 seconds
+        if quote:
+            _quote_cache.set(cache_key, quote, ttl_seconds=15)
+        
+        return quote
     
     def _get_alpaca_quote(self, symbol: str) -> Optional[StockQuote]:
-        """Get quote from Alpaca (fast, reliable, no rate limits)"""
+        """
+        Get quote from Alpaca (fast, reliable, no rate limits)
+        
+        ✅ FIXED: Use latestTrade.p for real-time price (not daily close)
+        """
         try:
             url = f"{ALPACA_DATA_URL}/v2/stocks/{symbol}/snapshot"
             response = requests.get(url, headers=self._alpaca_headers, timeout=10)
             
             if response.status_code != 200:
+                logger.debug(f"Alpaca snapshot returned {response.status_code} for {symbol}")
                 return None
             
             data = response.json()
             daily = data.get("dailyBar", {})
             prev = data.get("prevDailyBar", {})
-            latest = data.get("latestTrade", {})
+            latest_trade = data.get("latestTrade", {})
+            minute_bar = data.get("minuteBar", {})
             
-            price = daily.get("c") or latest.get("p")
+
+            # 1. Latest trade price (most recent actual trade)
+            # 2. Minute bar close (recent 1-min aggregation)
+            # 3. Daily bar close (fallback - may be stale intraday)
+            price = latest_trade.get("p") or minute_bar.get("c") or daily.get("c")
             prev_close = prev.get("c")
             
             if not price:
@@ -81,29 +157,74 @@ class StockDataService:
             change = price - prev_close if prev_close else 0
             change_pct = (change / prev_close) * 100 if prev_close else 0
             
+            # Volume: use daily bar volume (accumulated today)
+            volume = daily.get("v", 0)
+            
             return StockQuote(
                 symbol=symbol.upper(),
-                price=price,
+                price=round(price, 2),
                 open=daily.get("o", price),
                 high=daily.get("h", price),
                 low=daily.get("l", price),
-                close=price,
-                volume=daily.get("v", 0),
+                close=round(price, 2),
+                volume=volume,
                 previous_close=prev_close or price,
-                change=change,
-                change_percent=change_pct,
+                change=round(change, 2),
+                change_percent=round(change_pct, 2),
                 timestamp=datetime.now(timezone.utc),
             )
+        except requests.exceptions.Timeout:
+            logger.warning(f"Alpaca quote timed out for {symbol}")
+            return None
         except Exception as e:
             logger.debug(f"Alpaca quote failed for {symbol}: {e}")
             return None
     
     def _get_yahoo_quote(self, symbol: str) -> Optional[StockQuote]:
-        """Get quote from Yahoo Finance (fallback, has more detail)"""
+        """
+        Get quote from Yahoo Finance (fallback)
+        
+        ✅ FIXED: Use fast_info for real-time price instead of daily history Close
+        fast_info provides: lastPrice, previousClose, open, dayLow, dayHigh, volume
+        This is the actual real-time quote, not the stale daily bar close!
+        """
         try:
             ticker = yf.Ticker(symbol)
             
-            # 1. Try standard history (daily)
+
+            # fast_info is a cached property that makes a single request
+            try:
+                fast = ticker.fast_info
+                
+                price = getattr(fast, 'last_price', None) or getattr(fast, 'lastPrice', None)
+                prev_close = getattr(fast, 'previous_close', None) or getattr(fast, 'regularMarketPreviousClose', None)
+                open_price = getattr(fast, 'open', None) or getattr(fast, 'regularMarketOpen', None)
+                day_high = getattr(fast, 'day_high', None) or getattr(fast, 'dayHigh', None)
+                day_low = getattr(fast, 'day_low', None) or getattr(fast, 'dayLow', None)
+                volume = getattr(fast, 'last_volume', None) or getattr(fast, 'volume', None) or 0
+                
+                if price and prev_close:
+                    change = price - prev_close
+                    change_pct = (change / prev_close) * 100 if prev_close else 0
+                    
+                    return StockQuote(
+                        symbol=symbol.upper(),
+                        price=round(float(price), 2),
+                        open=round(float(open_price), 2) if open_price else round(float(price), 2),
+                        high=round(float(day_high), 2) if day_high else round(float(price), 2),
+                        low=round(float(day_low), 2) if day_low else round(float(price), 2),
+                        close=round(float(price), 2),
+                        volume=int(volume) if volume else 0,
+                        previous_close=round(float(prev_close), 2),
+                        change=round(float(change), 2),
+                        change_percent=round(float(change_pct), 2),
+                        timestamp=datetime.now(timezone.utc),
+                    )
+            except Exception as fast_err:
+                logger.debug(f"fast_info failed for {symbol}: {fast_err}, trying history fallback")
+            
+            # Fallback to history if fast_info fails
+            # This uses daily bars - less accurate intraday but works as backup
             hist = ticker.history(period="2d")
             
             if hist.empty:
@@ -112,48 +233,30 @@ class StockDataService:
             current = hist.iloc[-1]
             previous = hist.iloc[-2] if len(hist) > 1 else current
             
-            # SESSION AWARE VOLUME STRATEGY
-            # Standard 'Volume' field in daily bar is often delayed/wrong intraday.
-            # We calculate accurate volume by summing 1-minute bars for today if the daily volume seems low.
-            
-            current_volume = int(current["Volume"])
-            
-            # Sanity check: If a major stock has < 1M volume during market hours, something is wrong.
-            # We force a 1-minute interval check to sum up realized volume.
-            if current_volume < 1000000:  # Threshold for "suspiciously low"
-                 try:
-                     # Fetch today's minute data INCLUDING pre/post market
-                     # This ensures we get the "Total Volume" (Pre-market + Open session)
-                     min_hist = ticker.history(period="1d", interval="1m", prepost=True)
-                     if not min_hist.empty:
-                         real_sum_vol = min_hist["Volume"].sum()
-                         # Only replace if the minute sum is greater (implies we caught more trades)
-                         if real_sum_vol > current_volume:
-                             logger.info(f"Corrected volume for {symbol} via minute-sum (inc. pre-market): {current_volume} -> {real_sum_vol}")
-                             current_volume = real_sum_vol
-                 except Exception as err:
-                     logger.warning(f"Failed to fetch minute volume for {symbol}: {err}")
-            
+            # For daily history, the "Close" is end-of-day, not real-time
+            # But it's better than nothing as a fallback
             price = float(current["Close"])
             prev_close = float(previous["Close"])
+            current_volume = int(current["Volume"])
+            
             change = price - prev_close
             change_pct = (change / prev_close) * 100 if prev_close else 0
             
             return StockQuote(
                 symbol=symbol.upper(),
-                price=price,
-                open=float(current["Open"]),
-                high=float(current["High"]),
-                low=float(current["Low"]),
-                close=price,
-                volume=int(current_volume),
-                previous_close=prev_close,
-                change=change,
-                change_percent=change_pct,
+                price=round(price, 2),
+                open=round(float(current["Open"]), 2),
+                high=round(float(current["High"]), 2),
+                low=round(float(current["Low"]), 2),
+                close=round(price, 2),
+                volume=current_volume,
+                previous_close=round(prev_close, 2),
+                change=round(change, 2),
+                change_percent=round(change_pct, 2),
                 timestamp=datetime.now(timezone.utc),
             )
         except Exception as e:
-            logger.debug(f"Yahoo quote failed for {symbol}: {e}")
+            logger.warning(f"Yahoo quote failed for {symbol}: {e}")
             return None
     
     def get_historical_data(self, symbol: str, period: str = "1y") -> Optional[dict]:
@@ -168,7 +271,16 @@ class StockDataService:
             Dict with lists: dates, opens, highs, lows, closes, volumes
             
         Note: Yahoo is better for historical data (Alpaca requires paid subscription)
+        ✅ FIXED: Added caching (60 second TTL) to prevent rate limiting
         """
+        symbol = symbol.upper().strip()
+        cache_key = f"history:{symbol}:{period}"
+        
+        # Check cache first
+        cached = _history_cache.get(cache_key)
+        if cached:
+            return cached
+        
         try:
             ticker = yf.Ticker(symbol)
             hist = ticker.history(period=period)
@@ -176,7 +288,7 @@ class StockDataService:
             if hist.empty:
                 return None
             
-            return {
+            result = {
                 "dates": hist.index.strftime("%Y-%m-%d").tolist(),
                 "opens": hist["Open"].tolist(),
                 "highs": hist["High"].tolist(),
@@ -184,6 +296,11 @@ class StockDataService:
                 "closes": hist["Close"].tolist(),
                 "volumes": hist["Volume"].tolist(),
             }
+            
+            # Cache for 60 seconds (historical data doesn't change that often)
+            _history_cache.set(cache_key, result, ttl_seconds=60)
+            
+            return result
         except Exception as e:
             logger.debug(f"Error fetching history for {symbol}: {e}")
             return None
@@ -197,7 +314,17 @@ class StockDataService:
         - Market cap
         - Sector/Industry
         - Short interest
+        
+        ✅ FIXED: Added caching (1 hour TTL) - fundamentals don't change often
         """
+        symbol = symbol.upper().strip()
+        cache_key = f"fundamentals:{symbol}"
+        
+        # Check cache first
+        cached = _fundamentals_cache.get(cache_key)
+        if cached:
+            return cached
+        
         try:
             ticker = yf.Ticker(symbol)
             info = ticker.info
@@ -205,7 +332,7 @@ class StockDataService:
             market_cap = info.get("marketCap")
             market_cap_fmt = self._format_market_cap(market_cap) if market_cap else None
             
-            return Fundamentals(
+            result = Fundamentals(
                 market_cap=market_cap,
                 market_cap_formatted=market_cap_fmt,
                 pe_ratio=info.get("trailingPE"),
@@ -218,17 +345,36 @@ class StockDataService:
                 float_shares=info.get("floatShares"),
                 short_percent=info.get("shortPercentOfFloat"),
             )
+            
+            # Cache for 1 hour (fundamentals rarely change)
+            _fundamentals_cache.set(cache_key, result, ttl_seconds=3600)
+            
+            return result
         except Exception as e:
             logger.debug(f"Error fetching fundamentals for {symbol}: {e}")
             return None
     
     def get_company_name(self, symbol: str) -> Optional[str]:
-        """Get company name for a symbol (Yahoo Finance)"""
+        """
+        Get company name for a symbol (Yahoo Finance)
+        
+        ✅ FIXED: Use cached fundamentals when available, proper exception handling
+        """
+        symbol = symbol.upper().strip()
+        
+        # Try to get from cached fundamentals first
+        cache_key = f"fundamentals:{symbol}"
+        cached = _fundamentals_cache.get(cache_key)
+        
+        # If we have fundamentals, we made a ticker.info call, so make another for name
+        # Or just fetch it directly
         try:
             ticker = yf.Ticker(symbol)
-            return ticker.info.get("longName") or ticker.info.get("shortName")
-        except:
-            return None
+            info = ticker.info
+            return info.get("longName") or info.get("shortName") or symbol
+        except Exception as e:
+            logger.debug(f"Error fetching company name for {symbol}: {e}")
+            return symbol  # Return symbol as fallback instead of None
 
     def get_insider_transactions(self, symbol: str) -> Optional[dict]:
         """

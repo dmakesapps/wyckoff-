@@ -6,10 +6,13 @@ Uses yfinance for news (free)
 """
 
 import yfinance as yf
+import logging
 from typing import Optional
 from datetime import datetime, timezone, timedelta
 
 from api.models.stock import NewsItem, NewsSummary
+
+logger = logging.getLogger(__name__)
 
 
 class NewsService:
@@ -45,34 +48,43 @@ class NewsService:
             
             for item in news_data[:limit]:
                 try:
-                    # Handle new yfinance news structure (nested under 'content')
-                    content = item.get("content", item)  # Fallback to item if no content key
+
+                    # yfinance changes their structure occasionally, so we need to be flexible
+                    content = item.get("content", item)  # Try nested "content" key first
                     
-                    # Get title
-                    title = content.get("title", "")
+                    # If content is a string (old format), use the item directly
+                    if isinstance(content, str):
+                        content = item
+                    
+                    # Get title - required field
+                    title = content.get("title", "") or item.get("title", "")
                     if not title:
                         continue
                     
-                    # Get source/publisher
-                    provider = content.get("provider", {})
-                    source = provider.get("displayName", "Unknown") if isinstance(provider, dict) else "Unknown"
+                    # Get source/publisher (handle multiple formats)
+                    source = "Unknown"
+                    provider = content.get("provider", {}) or item.get("publisher", "")
+                    if isinstance(provider, dict):
+                        source = provider.get("displayName") or provider.get("name", "Unknown")
+                    elif isinstance(provider, str):
+                        source = provider
                     
-                    # Get URL
+                    # Get URL (handle multiple formats)
+                    url = ""
                     canonical = content.get("canonicalUrl", {})
-                    url = canonical.get("url", "") if isinstance(canonical, dict) else ""
+                    if isinstance(canonical, dict):
+                        url = canonical.get("url", "")
+                    elif isinstance(canonical, str):
+                        url = canonical
+                    # Fallback to direct link fields
+                    if not url:
+                        url = content.get("link", "") or item.get("link", "")
                     
                     # Get summary
-                    summary = content.get("summary") or content.get("description")
+                    summary = content.get("summary") or content.get("description") or item.get("summary", "")
                     
-                    # Parse timestamp
-                    pub_date_str = content.get("pubDate") or content.get("displayTime")
-                    if pub_date_str:
-                        try:
-                            pub_time = datetime.fromisoformat(pub_date_str.replace("Z", "+00:00"))
-                        except:
-                            pub_time = datetime.now(timezone.utc)
-                    else:
-                        pub_time = datetime.now(timezone.utc)
+
+                    pub_time = self._parse_timestamp(content, item)
                     
                     sources_seen.add(source)
                     
@@ -85,7 +97,8 @@ class NewsService:
                         sentiment=self._analyze_sentiment(title),
                     ))
                 except Exception as e:
-                    print(f"Error parsing news item: {e}")
+
+                    logger.warning(f"Error parsing news item for {symbol}: {e}")
                     continue
             
             # Determine overall sentiment with weighting (recent news weighted more)
@@ -179,6 +192,78 @@ class NewsService:
         else:
             days = int(hours / 24)
             return f"{days} days ago"
+    
+    def _parse_timestamp(self, content: dict, item: dict) -> datetime:
+        """
+        ✅ FIXED: Robust timestamp parsing with multiple format support
+        
+        Tries multiple timestamp fields and formats to extract the published date.
+        Falls back to a "stale" date (1 week ago) rather than "now" to prevent
+        old news from appearing as fresh.
+        """
+        # List of possible timestamp fields (in order of priority)
+        timestamp_fields = [
+            ("pubDate", content),
+            ("displayTime", content),
+            ("providerPublishTime", content),  # Unix timestamp in some versions
+            ("providerPublishTime", item),
+            ("pubTime", item),
+            ("published", item),
+        ]
+        
+        for field_name, source in timestamp_fields:
+            timestamp_val = source.get(field_name)
+            if timestamp_val:
+                parsed = self._try_parse_timestamp(timestamp_val)
+                if parsed:
+                    return parsed
+        
+
+        # This prevents old news from appearing as brand new
+        logger.debug(f"Could not parse timestamp from news item, using fallback")
+        return datetime.now(timezone.utc) - timedelta(days=7)
+    
+    def _try_parse_timestamp(self, value) -> Optional[datetime]:
+        """Try to parse a timestamp value in various formats"""
+        
+        # Handle Unix timestamp (integer seconds)
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(value, tz=timezone.utc)
+            except (ValueError, OSError):
+                pass
+        
+        # Handle string formats
+        if isinstance(value, str):
+            # Try ISO format first (most common)
+            try:
+                # Handle "Z" suffix
+                clean_val = value.replace("Z", "+00:00")
+                return datetime.fromisoformat(clean_val)
+            except ValueError:
+                pass
+            
+            # Try common date formats
+            formats_to_try = [
+                "%Y-%m-%dT%H:%M:%S.%f%z",
+                "%Y-%m-%dT%H:%M:%S%z",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d",
+                "%a, %d %b %Y %H:%M:%S %Z",  # RFC 822
+                "%a, %d %b %Y %H:%M:%S %z",
+            ]
+            
+            for fmt in formats_to_try:
+                try:
+                    parsed = datetime.strptime(value, fmt)
+                    # Add UTC timezone if naive
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    return parsed
+                except ValueError:
+                    continue
+        
+        return None
     
     def _analyze_sentiment(self, text: str) -> str:
         """

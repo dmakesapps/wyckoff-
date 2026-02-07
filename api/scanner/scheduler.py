@@ -5,14 +5,12 @@ Background scheduler for running market scans
 Runs alongside the FastAPI server
 """
 
-import asyncio
 import threading
 import logging
 from datetime import datetime, timezone
-from typing import Optional, Callable
+from typing import Optional
 
 from api.scanner.database import ScannerDB
-from api.scanner.fast_scan import FastScanner
 from api.scanner.alpaca_scan import AlpacaScanner
 
 logger = logging.getLogger(__name__)
@@ -27,18 +25,10 @@ class ScannerScheduler:
     - Every 2 hours outside market hours
     """
     
-    def __init__(self, interval_minutes: int = 30, use_alpaca: bool = True):
+    def __init__(self, interval_minutes: int = 30):
         self.interval_minutes = interval_minutes
         self.db = ScannerDB()
-        self.use_alpaca = use_alpaca
-        
-        # Use Alpaca for more reliable bulk scanning (200 req/min vs Yahoo's ~500 before blocking)
-        if use_alpaca:
-            self.scanner = AlpacaScanner(self.db)
-            logger.info("Using Alpaca scanner (faster, more reliable)")
-        else:
-            self.scanner = FastScanner(self.db)
-            logger.info("Using yfinance scanner (slower, may hit rate limits)")
+        self.scanner = AlpacaScanner(self.db)
         
         self._running = False
         self._thread: Optional[threading.Thread] = None
@@ -137,9 +127,6 @@ class ScannerScheduler:
     def _cleanup_invalid_symbols(self):
         """Remove delisted/invalid symbols from the database"""
         try:
-            if not self.use_alpaca:
-                return  # Only cleanup when using Alpaca (has reliable active symbols list)
-            
             logger.info("🧹 Cleaning up invalid/delisted symbols...")
             
             # Get symbols in DB

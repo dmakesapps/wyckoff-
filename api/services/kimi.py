@@ -142,9 +142,11 @@ class KimiService:
                     "death_cross": technicals.moving_averages.death_cross,
                 },
                 "volatility": {
-                    "bollinger_position": technicals.volatility.bb_position,
-                    "bb_upper": round(technicals.volatility.bb_upper, 2) if technicals.volatility.bb_upper else None,
-                    "bb_lower": round(technicals.volatility.bb_lower, 2) if technicals.volatility.bb_lower else None,
+
+                    "bollinger_position": technicals.volatility.price_position,
+                    "bollinger_upper": round(technicals.volatility.bollinger_upper, 2) if technicals.volatility.bollinger_upper else None,
+                    "bollinger_lower": round(technicals.volatility.bollinger_lower, 2) if technicals.volatility.bollinger_lower else None,
+                    "bollinger_width": technicals.volatility.bollinger_width,
                     "atr_percent": f"{technicals.volatility.atr_percent:.1f}%" if technicals.volatility.atr_percent else None,
                 },
                 "volume_analysis": {
@@ -515,11 +517,12 @@ Respond ONLY with valid JSON."""
             summary += f"Options flow shows P/C ratio of {options.put_call_ratio:.2f}."
         
         # Calculate support/resistance from Bollinger Bands
+
         price_targets = None
-        if technicals.volatility.bb_lower and technicals.volatility.bb_upper:
+        if technicals.volatility.bollinger_lower and technicals.volatility.bollinger_upper:
             price_targets = {
-                "support": round(technicals.volatility.bb_lower, 2),
-                "resistance": round(technicals.volatility.bb_upper, 2),
+                "support": round(technicals.volatility.bollinger_lower, 2),
+                "resistance": round(technicals.volatility.bollinger_upper, 2),
             }
         
         return AIAnalysis(

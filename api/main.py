@@ -1600,8 +1600,8 @@ async def get_top_headlines(
                     try:
                         pub_time = datetime.fromisoformat(headline["published"].replace("Z", "+00:00"))
                         headline["age"] = _get_time_ago(pub_time)
-                    except:
-                        pass
+                    except (ValueError, TypeError):
+                        pass  # Skip if date parsing fails
             cached["from_cache"] = True
             cached["cache_expires_at"] = (_headlines_cache["timestamp"] + timedelta(minutes=_headlines_cache["cache_minutes"])).isoformat()
             return cached
